@@ -15,9 +15,9 @@ Mycelium is what that approach looks like with three additions the published wor
 Mycelium is explicitly not:
 
 - A coding agent itself. Claude Code, Codex, Cursor, etc. are the agents. Mycelium gives them better retrieval.
-- A Language Server Protocol implementation. Tools like Serena cover LSP-precision queries; Mycelium covers semantic and graph-augmented retrieval. The two compose.
+- A Language Server Protocol implementation. Mycelium *uses* language servers internally during indexing — coordinated via multilspy — to refine call/reference edges with type-aware precision. It does not implement, expose, or proxy an LSP at the agent surface. Tools like Serena cover LSP-precision queries at the agent surface; Mycelium covers semantic and graph-augmented retrieval. The two compose.
 - A general-purpose graph database. FalkorDB is the storage layer; Mycelium is the indexing pipeline and query CLI on top.
-- A cloud service. Everything runs locally. Embedding models are local. Description synthesis is local. Cloud model support may be added later as an opt-in routing option, but never as a default.
+- A cloud service. Everything runs locally by default — embedding, description synthesis, and reranking. The model layer is provider-agnostic: each role (`Embedder`, `Synthesizer`, `Reranker`) is a swappable trait, and Ollama is the shipping default. Cloud providers (Anthropic, OpenAI, Qwen-cloud, etc.) and remote self-hosted Ollama endpoints are configurable per role, but never the default. The token-savings thesis only holds when the internal pipeline is local; cloud routing is an escape hatch, not a paved road.
 - An IDE plugin. The interface is a CLI invoked by an agent's bash tool, not an editor extension.
 
 ## System overview
@@ -32,11 +32,29 @@ Three components, deliberately kept separable:
 
 The split matters because indexing is heavy and benefits from a long-running process (cached models, warm filesystem watcher), while querying is light and should be invoked per-request from the CLI without involving the daemon.
 
+**Model-provider abstraction.** Every model call goes through a small trait surface — `Embedder`, `Synthesizer`, `Reranker` — implemented for `Ollama` in v0 and extensible to cloud providers later. The trait split matters because the three roles have different swap costs: switching embedder requires a full reindex (vector dimension is sticky), switching synthesizer affects only future descriptions, and switching reranker is free at query time. Configuration picks one provider *per role*, not one provider for everything.
+
+## Hardware tiers and model selection
+
+Mycelium supports a wide range of dev hardware, from 8GB unified-memory laptops to 64GB+ workstations. The defaults are organized into three tiers; the bootstrap script detects available memory and picks one. Users override via `MYCEL_TIER` or `[models] tier =` in config.
+
+| Tier | Target hardware | Embedder | Reranker | Synthesizer |
+|------|-----------------|----------|----------|-------------|
+| `minimal` | 8GB MBA-class | embeddinggemma (300M, ~200MB) | qwen3-reranker:0.6b (~600MB) | gemma4:e2b (Q4, ~1.5GB) |
+| `balanced` | 16GB | embeddinggemma | qwen3-reranker:0.6b | gemma4:e4b (Q4, ~3GB) |
+| `max` | 32GB+ | embeddinggemma | qwen3-reranker:4b | qwen3.6:35b-a3b (Q4, ~17GB) |
+
+The embedder is **the same model across all tiers** — EmbeddingGemma at 768d. This is deliberate: vector dimension is tied to the FalkorDB vector index at build time, and a tier change should never force a reindex. EmbeddingGemma fits comfortably even on `minimal`, MRL-truncatable down to 128d if storage matters more than retrieval quality.
+
+The reranker upgrades on `max` because the swap is free (applied at query time, no reindex). The synthesizer's tier choice is the most consequential — quality of description synthesis scales meaningfully with model size, and `minimal` users get a smaller model with the option to point `synthesizer.endpoint` at a remote Ollama or cloud provider when description quality matters.
+
+Reranker pick is an empirical question Phase 4 will settle: build a small eval harness against real Mycelium-shape queries and compare candidates (qwen3-reranker, gte-reranker-modernbert-base via sidecar, mxbai-rerank-v2 via sidecar, jina-reranker-v2 via sidecar). The default may change once the eval is in place. The trait abstraction makes swaps trivial.
+
 ## Storage architecture
 
 FalkorDB as the graph + vector store. One Redis instance with the FalkorDB module loaded, one graph per indexed repo, namespaced as `mycel:<repo-name>`. Cypher for queries, GraphBLAS-backed traversal under the hood.
 
-Why FalkorDB specifically: it's the most actively maintained embedded-style graph DB targeting AI/GraphRAG workloads as of early 2026. Kuzu, the other obvious candidate, was archived in October 2025 after Apple acquired the team. FalkorDB's traversal is sub-millisecond on the queries Mycelium issues, vector search lives in the same graph as the structural data (no sync problem), and the Redis-module deployment model is operationally trivial — one container on Isengard.
+Why FalkorDB specifically: it's the most actively maintained embedded-style graph DB targeting AI/GraphRAG workloads as of early 2026. Kuzu, the other obvious candidate, was archived in October 2025 after Apple acquired the team. FalkorDB's traversal is sub-millisecond on the queries Mycelium issues, vector search lives in the same graph as the structural data (no sync problem), and the Redis-module deployment model is operationally trivial — one local Docker container, started and torn down via `just up`/`just down`.
 
 The license is AGPL-3.0 community / commercial enterprise. For local CLI use this is functionally equivalent to MIT. Anyone who wants to host Mycelium-as-a-service would need to release modifications, which is appropriate for an OSS tool.
 
@@ -65,36 +83,29 @@ The schema is deliberately denormalized for retrieval speed. We're optimizing fo
 
 ### Vector index
 
-Each `Symbol` node carries an `embedding` property — a 768-dimension float32 vector produced by Qwen3-Embedding-0.6B with Matryoshka truncation from its native 1024d. FalkorDB's vector index handles cosine similarity search natively; `db.idx.vector.queryNodes()` returns ranked symbols against a query vector.
+Each `Symbol` node carries an `embedding` property — a 768-dimension float32 vector produced by EmbeddingGemma (Google's 300M-parameter on-device embedding model, Apache 2.0, Matryoshka-trained, native 768d with optional truncation to 128d). FalkorDB's vector index handles cosine similarity search natively; `db.idx.vector.queryNodes()` returns ranked symbols against a query vector. The active embedder identity and dimension are stored as graph metadata and used to gate `mycel reindex --embedder=<new>` migrations — accidental embedder swaps are refused rather than silently producing a corrupted index.
 
 The choice to embed *synthesized descriptions* rather than raw signatures is the central retrieval-quality decision. Raw signatures and bodies cluster by surface syntax — embeddings of two unrelated React components both look "similar" because they both define components. Descriptions cluster by behavior — "validates and parses an OAuth bearer token" and "checks request authentication" embed close because they're semantically close, even if the symbols look nothing alike. This matters most on codebases with sparse comments (most production codebases), which is exactly when the agent needs the retrieval most.
 
 ## Indexing pipeline
 
-Five stages, run sequentially per file changed (in parallel across files):
+Six stages, run sequentially per file changed (in parallel across files):
 
-**1. Parse.** Tree-sitter walks the AST. Extracts symbols (with file/line ranges, signatures, JSDoc), call sites, imports, type references, class hierarchy. TypeScript/TSX/JavaScript/JSX in v0; Codebase-Memory's 66-language coverage is the long-term reference target. Per-language extraction strategies live in `src/extractors/<language>.rs` and follow a common trait.
+**1. Parse (tree-sitter).** Tree-sitter walks the AST. Extracts symbols (with file/line ranges, signatures, JSDoc), call sites, imports, type references, class hierarchy. **TypeScript/TSX/JavaScript/JSX and Rust in v0** — TypeScript covers the canonical web codebase target; Rust is the dogfooding target, since Mycelium is itself a Rust project and indexing its own source as it grows is the most realistic test. Codebase-Memory's 66-language coverage is the long-term reference target. Per-language extraction strategies live in `crates/mycel-extract/src/languages/<language>.rs` and follow a common trait. This is the floor — fast, multi-language, no external server dependencies.
 
-**2. Build graph.** Newly extracted symbols upsert into FalkorDB. Edges resolve via a 6-strategy call resolution pipeline borrowed conceptually from Codebase-Memory (the engineering insight here is real and worth crediting):
+**2. Refine (LSP via multilspy).** The daemon runs a long-running multilspy subprocess (Python wrapping language-server-protocol clients) and queries it for type-aware edge resolution on each parsed file. multilspy returns precise definition/reference/call info from the actual language server (`tsserver` for TS/TSX/JS/JSX, `rust-analyzer` for Rust), upgrading edges that tree-sitter could only resolve heuristically. Edges carry a `source` property (`tree-sitter` or `lsp`) so the graph remembers which resolver produced each edge. Languages without a configured LSP fall back to tree-sitter alone — heuristic but functional.
 
-1. Exact qualified-name match within file scope
-2. Imported-symbol resolution via the import graph
-3. Module re-export following
-4. Method receiver resolution (TypeScript `this`, class methods)
-5. Generic-name match within reachable scope (last-resort)
-6. Unresolved — recorded as a placeholder edge for later passes
+**3. Build graph.** Refined edges upsert into FalkorDB. The original 6-strategy heuristic pipeline (qualified-name match, imported-symbol resolution, re-export following, method receiver resolution, generic-name match, unresolved-placeholder) survives as the tree-sitter-only fallback path for languages without LSP coverage. With multilspy + a real type checker available, most edges are `source: lsp`.
 
-This is the boring-but-load-bearing part of the system. Get it wrong and the call graph is full of noise; get it right and Tier 4 retrieval becomes precise.
+**4. Embed.** Each new or changed symbol gets embedded. EmbeddingGemma running on local Ollama produces 768-dim vectors. Batched in groups of 32 for throughput. Vectors written into the graph as node properties. The active embedder identity and dimension are recorded once as graph metadata and gate future embedder swaps.
 
-**3. Embed.** Each new or changed symbol gets embedded. Qwen3-Embedding-0.6B running on local Ollama. Batched in groups of 32 for throughput. Vectors written into the graph as node properties.
+**5. Synthesize descriptions.** A tier-selected synthesizer (gemma4:e2b on `minimal`, gemma4:e4b on `balanced`, qwen3.6:35b-a3b on `max`) running on local Ollama generates a one-paragraph description per symbol. Input: signature + JSDoc + the bodies of immediate callers and callees (1-hop graph context — using the graph we just built to inform descriptions about each symbol's role). Output: 2-3 sentences capturing what the symbol does, what it returns, and what its role is in the codebase. These descriptions are then re-embedded — the embedding step runs *twice* in v1, once on raw signatures for fast first-pass retrieval (Phase 1) and once on synthesized descriptions for high-quality retrieval (Phase 2+). v0 ships with signature-only embeddings to get a working system; descriptions land in Phase 2.
 
-**4. Synthesize descriptions.** Qwen3.6-35B-A3B running on local Ollama generates a one-paragraph description per symbol. Input: signature + JSDoc + the bodies of immediate callers and callees (1-hop graph context — using the graph we just built to inform descriptions about each symbol's role). The 262K context window means we can stuff substantial context per generation. Output: 2-3 sentences capturing what the symbol does, what it returns, and what its role is in the codebase. These descriptions are then re-embedded — the embedding step runs *twice* in v1, once on raw signatures for fast first-pass retrieval and once on synthesized descriptions for high-quality retrieval. v0 ships with signature-only embeddings to get a working system; descriptions land in phase 3.
-
-**5. Update derived edges.** `CO_CHANGED` and `TESTED_BY` edges are recomputed for affected subgraphs. Co-change analysis walks the recent commit history (last 200 commits as a default window) and increments edge counts; old commits decay via a recency factor. Test reachability does a forward BFS from each test file's exported symbols, recording every symbol reached as `TESTED_BY` with the test as source.
+**6. Update derived edges.** `CO_CHANGED` and `TESTED_BY` edges are recomputed for affected subgraphs. Co-change analysis walks the recent commit history (last 200 commits as a default window) and increments edge counts; old commits decay via a recency factor. Test reachability does a forward BFS from each test file's exported symbols, recording every symbol reached as `TESTED_BY` with the test as source.
 
 ### Incremental update strategy
 
-Cold first index of a 250K-LOC codebase like demand-ui: 30-60 minutes, dominated by description synthesis. Subsequent indexes are content-hash-keyed and skip unchanged files entirely.
+Cold first index of a 250K-LOC codebase like demand-ui (on `max` tier hardware): 30-60 minutes, dominated by description synthesis. On `minimal` tier, expect 2-3× that figure or a config that points the synthesizer at a remote endpoint. Subsequent indexes are content-hash-keyed and skip unchanged files entirely regardless of tier.
 
 The daemon watches via `notify` (Rust filesystem watcher) for fast feedback during active development, with a debounce of 2 seconds to coalesce burst-write events from build tools. Git push events are also subscribable through a `mycel hook install` command that adds a post-commit hook calling `mycel reindex --since HEAD~1`.
 
@@ -134,7 +145,7 @@ The `mycel` CLI exposes the four tiers of queries we identified during design:
   1. Embed the query
   2. Vector search returns top 50 candidate symbols
   3. Graph expansion: pull each candidate's 1-2 hop neighborhood
-  4. Rerank the expanded set (~200 symbols) with Qwen3-Reranker-4B, conditioned on the original query
+  4. Rerank the expanded set (~200 symbols) with the configured reranker (default `qwen3-reranker:0.6b` on minimal/balanced tiers, `qwen3-reranker:4b` on max), conditioned on the original query
   5. Return top 8-12 with descriptions, file paths, and line ranges
 
 This is the query Claude Code will use most. It's also the query the design is structured around — Tiers 1-3 fall out of the same graph and embeddings.
@@ -147,7 +158,7 @@ The piece that turns Mycelium from "a code intelligence tool" into "a code intel
 
 **Repo knowledge.** The graph itself. Built passively, refined incrementally. Already covered above.
 
-**Convention knowledge.** Per-repo patterns extracted from commit history and code samples. Bootstrap pass on first index runs Qwen3.6 over the most-recent 50 PRs and a sample of source files, outputting `~/.local/share/mycel/<repo>/conventions.md` — patterns like "this codebase uses named exports, never default exports," "tests live in `__tests__/` directories," "components always have a paired `.stories.tsx` file." These get injected into the agent's context via the skill when invoked.
+**Convention knowledge.** Per-repo patterns extracted from commit history and code samples. Bootstrap pass on first index runs the configured synthesizer (tier-selected) over the most-recent 50 PRs and a sample of source files, outputting `~/.local/share/mycel/<repo>/conventions.md` — patterns like "this codebase uses named exports, never default exports," "tests live in `__tests__/` directories," "components always have a paired `.stories.tsx` file." These get injected into the agent's context via the skill when invoked.
 
 **Personal knowledge.** Cross-repo style preferences. Bootstrap pass samples the user's last 30 commits across all indexed repos and synthesizes a `~/.config/mycel/style.md`. Refined when the user runs `mycel correct <symbol> "<note>"` to record a manual correction. The corrections accumulate into a delta log that periodically gets summarized into rules.
 
@@ -187,35 +198,35 @@ For a codebase the size of demand-ui (~250K LOC, ~2.5K files, estimated 75-150K 
 - `mycel callers` / `mycel callees` / Tier 1 queries: under 50ms
 - Database size on disk: under 1GB
 
-These are working targets, not contractual SLAs. Real numbers come from running the thing on real code.
+These are working targets, not contractual SLAs. Real numbers come from running the thing on real code. Targets above assume `max` tier hardware; cold first index on `minimal` (8GB MBA) is realistically 2-3× slower owing to smaller synthesizer models, smaller embed batch sizes, and more frequent model load/unload cycles. Query-side latencies (`mycel find`, Tier 1 queries) are largely tier-independent — the embedder and reranker are small and fast across tiers, and graph traversal is FalkorDB doing the work.
 
 ## Sequenced build plan
 
-Six phases, each producing a usable artifact.
+Five phases, each producing a usable artifact.
 
-**Phase 1 — symbol graph and Tier 1 queries.** Tree-sitter parser for TS/TSX/JS/JSX, FalkorDB schema, `mycel index` command, `mycel callers/callees/imports`. Usable for navigation tasks. ~2 weekends.
+**Phase 1 — symbol graph, Tier 1 queries, and `mycel find` (signature-embedded).** The full v0 surface: Cargo workspace skeleton (9 crates), FalkorDB local-container infra, tree-sitter + multilspy extraction for TS/TSX/JS/JSX, FalkorDB schema with vector index, EmbeddingGemma integration via the `Embedder` trait (Ollama provider), `mycel index`, all Tier 1 commands (`callers`, `callees`, `definers`, `imports`, `uses`, `implements`), and `mycel find` returning vector-search top-K against signature-embedded symbols. The compressed Phase 1+2 of the original plan — ships the token-savings thesis as the *first* shippable artifact rather than as a follow-on. ~3-4 weekends, or whatever an agent run takes.
 
-**Phase 2 — embeddings and `mycel find`.** Qwen3-Embedding integration, vector index, hybrid retrieval (vector + lexical via FalkorDB full-text search). `mycel find` works on signature-embedded symbols. Token savings start showing up here. ~1 weekend.
+**Phase 2 — synthesized descriptions and re-embedding.** Synthesizer trait wired to tiered Ollama defaults (gemma4:e2b/e4b, qwen3.6:35b-a3b), description generation pipeline with 1-hop graph context, re-embed on descriptions. `mycel find` quality jumps because retrieval clusters by behavior instead of by surface syntax. Slow first index on this phase, fast queries forever after.
 
-**Phase 3 — synthesized descriptions.** Qwen3.6-35B-A3B integration, description generation pipeline, re-embedding on descriptions. Retrieval quality jumps. Slow first index, fast queries forever after. ~1 weekend.
+**Phase 3 — graph-augmented retrieval and reranking.** `Reranker` trait wired (qwen3-reranker:0.6b/4b default), full Tier 4 pipeline (vector search → graph expand → rerank → top-K). Build the reranker eval harness on real Mycelium-shape queries to settle the "which reranker" question empirically; promote winner to default if different from current.
 
-**Phase 4 — graph-augmented retrieval and reranking.** Qwen3-Reranker integration, the full Tier 4 pipeline. `mycel find` becomes the headline command. ~1 weekend.
+**Phase 4 — git-derived edges and Tier 3 queries.** Co-change analysis, test reachability, `mycel similar` / `mycel canonical` / `mycel recent`. Personalization layer's task knowledge bootstrap also lives here — query/result logging starts here, retrieval-quality traces accumulate.
 
-**Phase 5 — git-derived edges and Tier 3 queries.** Co-change analysis, test reachability, `mycel similar` / `mycel canonical` / `mycel recent`. ~1 weekend.
+**Phase 5 — personalization and skill.** Convention extraction, style memory, failure knowledge, the skill doc itself. Token measurement framework. Cloud provider implementations (Anthropic, OpenAI, Qwen-cloud) drop into the `mycel-models` crate as additional `Embedder`/`Synthesizer`/`Reranker` impls — no architecture change needed. Ongoing iteration on the skill.
 
-**Phase 6 — personalization and skill.** Convention extraction, style memory, the skill doc itself. Token measurement framework. ~1 weekend, plus ongoing iteration on the skill.
-
-Phase 1 is usable in isolation. Each subsequent phase is additive — nothing rewrites earlier work. The order is chosen so the most leverage lands earliest: a working symbol graph (Phase 1) is already more capable than `grep`, and `mycel find` (Phase 2) is already saving tokens.
+Phase 1 is usable in isolation and *is the product thesis*. Each subsequent phase is additive — nothing rewrites earlier work. The order is chosen so the most leverage lands earliest: a working symbol graph + signature-embedded `find` (Phase 1) already saves tokens; description synthesis (Phase 2) lifts quality; the rest compounds from there.
 
 ## Open questions
 
 Things deliberately deferred:
 
 - **Cross-language graph edges.** What does it mean for a TypeScript file to call a C# endpoint? Out of scope for v1.
-- **Multi-language description synthesis.** Phase 3 assumes the synthesizer model handles whatever language we throw at it. Reasonable for TS/JS; needs validation for other languages when we add them.
-- **Reranker fine-tuning.** Off-the-shelf Qwen3-Reranker is the v1 plan. Whether a small fine-tune on accumulated retrieval-quality traces would meaningfully improve quality is an open empirical question.
+- **Multi-language description synthesis.** Phase 2's synthesizer is assumed to handle whatever language we throw at it. Reasonable for TS/JS; needs validation for other languages when we add them.
+- **Reranker pick.** Default is `qwen3-reranker:0.6b/4b` (Ollama-native, well-benchmarked). Phase 3 builds an empirical eval harness on real Mycelium-shape queries; candidates include `gte-reranker-modernbert-base`, `mxbai-rerank-v2`, and `jina-reranker-v2` (all sidecar-only on Ollama today). Default may move based on results.
+- **Reranker fine-tuning.** Whether a small fine-tune on accumulated retrieval-quality traces would meaningfully improve quality is an open empirical question, separate from picking the off-the-shelf default.
 - **MCP frontend.** A wrapper that exposes Mycelium's CLI as MCP tools is a reasonable addition for users on tools other than Claude Code (Cursor, Codex, Aider). Skill+CLI is the v1 default; MCP is a thin shim we can add later without changing the backend.
 - **Multi-tenant deployments.** Mycelium is single-user for v1. Sharing an index across a team would require auth, access control, and a different storage tenancy model — all real work, all out of scope.
+- **Repo-local, distributable indexes.** A future pivot where `<repo>/.mycel/` is the source of truth (JSONL symbols/edges + binary embeddings + manifest), with FalkorDB as a hydrate-on-start cache. Would enable "clone repo with mycel installed → graph just works" and `mycel pack`/`unpack` for sharing prebuilt indexes. Architecture doesn't preclude it (embedder identity already in graph metadata, schema versioned, pipeline reproducible) but defer until Phase 5+ when real collaboration patterns surface — at which point the right format will be much clearer from usage.
 - **Editor integration.** No VSCode extension, no IntelliJ plugin in v1. The CLI is the universal interface.
 
 ## Status
