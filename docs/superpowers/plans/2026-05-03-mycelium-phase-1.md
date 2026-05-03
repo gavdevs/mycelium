@@ -403,11 +403,15 @@ toml = { workspace = true }
 mycel-graph = { path = "../mycel-graph" }
 mycel-query = { path = "../mycel-query" }
 mycel-models = { path = "../mycel-models" }
+mycel-index = { path = "../mycel-index" }
+mycel-lsp = { path = "../mycel-lsp" }
 mycel-core = { path = "../mycel-core" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 camino = { workspace = true }
+blake3 = { workspace = true }
+dirs = "5"
 ```
 
 `crates/mycel-daemon/Cargo.toml` (binary):
@@ -1975,8 +1979,14 @@ Expected: FAIL — module doesn't exist.
 // crates/mycel-extract/src/languages/typescript.rs
 use camino::Utf8Path;
 use mycel_core::*;
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor, Tree, Node};
 use crate::{Extractor, ExtractionOutput};
+
+// Note: tree-sitter 0.25 returns a `StreamingIterator` from
+// `QueryCursor::matches`; you cannot use `for m in ...`. Use
+// `while let Some(m) = matches.next()` after `use streaming_iterator::StreamingIterator;`.
+// Add `streaming-iterator = "0.1"` to mycel-extract Cargo.toml.
 
 pub struct TypeScriptExtractor {
     ts_lang: Language,
@@ -2033,7 +2043,8 @@ fn extract_symbols_and_edges(
         .map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("ts query: {e}") })?;
     let mut cursor = QueryCursor::new();
     let bytes = src.as_bytes();
-    for m in cursor.matches(&q, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         let mut name: Option<&str> = None;
         let mut kind: Option<SymbolKind> = None;
         let mut start_node: Option<Node> = None;
@@ -2076,35 +2087,41 @@ fn extract_symbols_and_edges(
         }
     }
 
-    // Calls: function/method invocations.
+    // Calls: function/method invocations. Resolve the *enclosing* function for each
+    // call site by walking parents from the call node — the simplified CALLS_QUERY
+    // captures only the call site; we derive `caller` here.
     let q_calls = Query::new(lang, CALLS_QUERY)
         .map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("ts calls: {e}") })?;
     let mut cursor = QueryCursor::new();
-    for m in cursor.matches(&q_calls, tree.root_node(), bytes) {
-        let mut callee: Option<&str> = None;
-        let mut caller: Option<&str> = None;
+    let mut matches = cursor.matches(&q_calls, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
+        let mut callee_node: Option<Node> = None;
+        let mut site_node: Option<Node> = None;
         for c in m.captures {
             match q_calls.capture_names()[c.index as usize].as_ref() {
-                "callee" => callee = Some(c.node.utf8_text(bytes).unwrap_or("")),
-                "caller_fn" | "caller_method" => caller = Some(c.node.utf8_text(bytes).unwrap_or("")),
+                "callee" => callee_node = Some(c.node),
+                "site" => site_node = Some(c.node),
                 _ => {}
             }
         }
-        if let (Some(callee), Some(caller)) = (callee, caller) {
-            edges.push(Edge {
-                from: format!("{}::{}", file.as_str(), caller),
-                to: callee.into(),
-                kind: EdgeKind::Calls,
-                source: EdgeSource::TreeSitter,
-            });
-        }
+        let (Some(callee), Some(site)) = (callee_node, site_node) else { continue };
+        let callee_name = callee.utf8_text(bytes).unwrap_or("");
+        if callee_name.is_empty() { continue; }
+        let caller = enclosing_named_decl(site, bytes).unwrap_or("<file>");
+        edges.push(Edge {
+            from: format!("{}::{}", file.as_str(), caller),
+            to: callee_name.into(),
+            kind: EdgeKind::Calls,
+            source: EdgeSource::TreeSitter,
+        });
     }
 
     // Imports: file-level import statements.
     let q_imports = Query::new(lang, IMPORTS_QUERY)
         .map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("ts imports: {e}") })?;
     let mut cursor = QueryCursor::new();
-    for m in cursor.matches(&q_imports, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q_imports, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         for c in m.captures {
             if q_imports.capture_names()[c.index as usize].as_ref() == "import.source" {
                 let src_text = c.node.utf8_text(bytes).unwrap_or("").trim_matches('"').trim_matches('\'');
@@ -2119,6 +2136,30 @@ fn extract_symbols_and_edges(
     }
 
     Ok(())
+}
+
+/// Walks parents of `node` to find the nearest function/method/class declaration
+/// and returns its name (best-effort).
+fn enclosing_named_decl<'a>(node: Node, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "function_declaration" | "function" | "method_definition" | "arrow_function" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    return name_node.utf8_text(bytes).ok();
+                }
+                return Some("<anonymous>");
+            }
+            "class_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    return name_node.utf8_text(bytes).ok();
+                }
+            }
+            _ => {}
+        }
+        cur = parent;
+    }
+    None
 }
 
 fn signature_first_line(n: Node, src: &str) -> Option<String> {
@@ -2245,6 +2286,7 @@ Expected: FAIL — `RustExtractor` doesn't exist.
 // crates/mycel-extract/src/languages/rust.rs
 use camino::Utf8Path;
 use mycel_core::*;
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor, Tree, Node};
 use crate::{Extractor, ExtractionOutput};
 
@@ -2279,7 +2321,8 @@ fn extract_rust(
     let q = Query::new(lang, RUST_SYMBOLS).map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("rs query: {e}") })?;
     let mut cursor = QueryCursor::new();
     let bytes = src.as_bytes();
-    for m in cursor.matches(&q, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         let mut name: Option<&str> = None;
         let mut kind: Option<SymbolKind> = None;
         let mut def_node: Option<Node> = None;
@@ -2322,7 +2365,8 @@ fn extract_rust(
     // Impl blocks → IMPLEMENTS edges
     let q_impl = Query::new(lang, RUST_IMPLS).map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("rs impls: {e}") })?;
     let mut cursor = QueryCursor::new();
-    for m in cursor.matches(&q_impl, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q_impl, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         let mut trait_name: Option<&str> = None;
         let mut type_name: Option<&str> = None;
         for c in m.captures {
@@ -2345,7 +2389,8 @@ fn extract_rust(
     // use statements → IMPORTS
     let q_use = Query::new(lang, RUST_USES).map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("rs uses: {e}") })?;
     let mut cursor = QueryCursor::new();
-    for m in cursor.matches(&q_use, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q_use, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         for c in m.captures {
             if q_use.capture_names()[c.index as usize].as_ref() == "use.path" {
                 let path = node_text(c.node, bytes).unwrap_or("");
@@ -2359,15 +2404,18 @@ fn extract_rust(
         }
     }
 
-    // Calls (heuristic — LSP refines)
+    // Calls — derive enclosing function as caller (heuristic; LSP refines later).
     let q_call = Query::new(lang, RUST_CALLS).map_err(|e| MycelError::Extract { file: file.to_string(), message: format!("rs calls: {e}") })?;
     let mut cursor = QueryCursor::new();
-    for m in cursor.matches(&q_call, tree.root_node(), bytes) {
+    let mut matches = cursor.matches(&q_call, tree.root_node(), bytes);
+    while let Some(m) = matches.next() {
         for c in m.captures {
             if q_call.capture_names()[c.index as usize].as_ref() == "callee" {
                 let callee = node_text(c.node, bytes).unwrap_or("");
+                if callee.is_empty() { continue; }
+                let caller = enclosing_fn(c.node, bytes).unwrap_or("<file>");
                 edges.push(Edge {
-                    from: file.as_str().into(),
+                    from: format!("{}::{}", file.as_str(), caller),
                     to: callee.into(),
                     kind: EdgeKind::Calls,
                     source: EdgeSource::TreeSitter,
@@ -2379,21 +2427,55 @@ fn extract_rust(
     Ok(())
 }
 
+fn enclosing_fn<'a>(node: Node, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        if matches!(parent.kind(), "function_item" | "function_signature_item") {
+            if let Some(name) = parent.child_by_field_name("name") {
+                return name.utf8_text(bytes).ok();
+            }
+        }
+        cur = parent;
+    }
+    None
+}
+
 fn node_text<'s>(n: Node, src: &'s [u8]) -> Option<&'s str> { n.utf8_text(src).ok() }
 
+// IMPORTANT — these tree-sitter-rust queries must be validated against the
+// installed grammar version before claiming the implementation works. See
+// Step 4b below for a verification step that calls Query::new(...) on each
+// constant and surfaces any "field not found" / "unknown node" errors early.
+//
+// Field names that may differ across tree-sitter-rust versions:
+// - function_item: `name:`  (stable)
+// - struct_item:   `name:`  (stable)
+// - trait_item:    `name:`  (stable)
+// - type_item:     `name:`  — verify; falls back to (identifier) child if missing
+// - const_item:    `name:`  — verify
+// - static_item:   `name:`  — verify
+// - mod_item:      `name:`  — verify
+// - impl_item:     `trait:` and `type:` exist; type may be (generic_type), not
+//                  just (type_identifier) — query below handles both.
+// If `Query::new(...)` returns a TSQueryError on any constant, drop the
+// problematic line and replace with a child-walking match in the impl body.
+
 const RUST_SYMBOLS: &str = r#"
-(function_item name: (identifier) @fn.name (visibility_modifier)? @vis.pub) @fn.def
-(struct_item name: (type_identifier) @struct.name (visibility_modifier)? @vis.pub) @struct.def
-(enum_item name: (type_identifier) @enum.name (visibility_modifier)? @vis.pub) @enum.def
-(trait_item name: (type_identifier) @trait.name (visibility_modifier)? @vis.pub) @trait.def
-(type_item name: (type_identifier) @type.name (visibility_modifier)? @vis.pub) @type.def
-(const_item name: (identifier) @const.name (visibility_modifier)? @vis.pub) @const.def
-(static_item name: (identifier) @static.name (visibility_modifier)? @vis.pub) @static.def
-(mod_item name: (identifier) @mod.name (visibility_modifier)? @vis.pub) @mod.def
+(function_item name: (identifier) @fn.name) @fn.def
+(struct_item   name: (type_identifier) @struct.name) @struct.def
+(enum_item     name: (type_identifier) @enum.name)   @enum.def
+(trait_item    name: (type_identifier) @trait.name)  @trait.def
+(type_item     name: (type_identifier) @type.name)   @type.def
+(const_item    name: (identifier) @const.name)       @const.def
+(static_item   name: (identifier) @static.name)      @static.def
+(mod_item      name: (identifier) @mod.name)         @mod.def
 "#;
 
+// `type:` in an impl_item may be a `type_identifier` (for `impl Trait for Foo`)
+// or a `generic_type` / `reference_type` etc. Match both common shapes.
 const RUST_IMPLS: &str = r#"
 (impl_item trait: (type_identifier) @trait type: (type_identifier) @ty)
+(impl_item trait: (type_identifier) @trait type: (generic_type type: (type_identifier) @ty))
 "#;
 
 const RUST_USES: &str = r#"
@@ -2407,16 +2489,64 @@ const RUST_CALLS: &str = r#"
 "#;
 ```
 
+- [ ] **Step 4b: Verify each tree-sitter query compiles before running fixture tests**
+
+Add `crates/mycel-extract/tests/query_compile.rs`:
+
+```rust
+//! Sanity check: every Query::new must succeed on the installed grammars.
+//! If any of these tests fails, the offending query string targets a
+//! field/node name that doesn't exist in the current tree-sitter grammar
+//! version. Fix the query, do not skip the test.
+
+use tree_sitter::{Language, Query};
+
+fn try_compile(name: &str, lang: Language, src: &str) {
+    Query::new(&lang, src).unwrap_or_else(|e| panic!("query `{name}` failed to compile: {e}"));
+}
+
+#[test]
+fn typescript_queries_compile() {
+    let ts: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let tsx: Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+    // Use the same constants from the typescript module via private re-export
+    // OR re-paste them here for the compile-check test. Easier: re-paste for now.
+    let symbols = include_str!("../src/languages/typescript_queries/symbols.scm");
+    let calls = include_str!("../src/languages/typescript_queries/calls.scm");
+    let imports = include_str!("../src/languages/typescript_queries/imports.scm");
+    for (label, src) in &[("symbols", symbols), ("calls", calls), ("imports", imports)] {
+        try_compile(&format!("ts/{label}"), ts.clone(), src);
+        try_compile(&format!("tsx/{label}"), tsx.clone(), src);
+    }
+}
+
+#[test]
+fn rust_queries_compile() {
+    let lang: Language = tree_sitter_rust::LANGUAGE.into();
+    let symbols = include_str!("../src/languages/rust_queries/symbols.scm");
+    let impls = include_str!("../src/languages/rust_queries/impls.scm");
+    let uses = include_str!("../src/languages/rust_queries/uses.scm");
+    let calls = include_str!("../src/languages/rust_queries/calls.scm");
+    for (label, src) in &[("symbols", symbols), ("impls", impls), ("uses", uses), ("calls", calls)] {
+        try_compile(&format!("rs/{label}"), lang.clone(), src);
+    }
+}
+```
+
+This requires extracting the inline query constants into per-language `.scm` files under `crates/mycel-extract/src/languages/typescript_queries/` and `rust_queries/`. The Rust modules then use `include_str!` instead of inline `const &str`. This is also better for maintainability — `.scm` files have editor support.
+
+If a test fails: open the failing `.scm` file, check the offending node/field name against the grammar's `node-types.json` (`cargo doc -p tree-sitter-rust --open`), fix the query, and re-run.
+
 - [ ] **Step 5: Run snapshot tests, approve, commit**
 
 Run: `cargo test -p mycel-extract`
 Run: `cargo insta review` (approve each)
 Re-run: `cargo test -p mycel-extract`
-Expected: PASS.
+Expected: PASS — both `query_compile` tests AND fixture snapshots.
 
 ```bash
 git add crates/mycel-extract tests/fixtures/rust
-git commit -m "Add RustExtractor with golden snapshot tests"
+git commit -m "Add RustExtractor with golden snapshot tests and query-compile guard"
 ```
 
 End of Chunk 3.
@@ -2451,14 +2581,21 @@ Each response: {"id": <int>, "edges": [...], "partial": <bool>, "error": <str?>}
 
 Edges shape: {"from": "<qname>", "to": "<qname>", "kind": "calls"|"uses_type"|"implements"|"imports", "source": "lsp"}.
 
-multilspy provides: SyncLanguageServer.create(...).request_definition,
-  request_references, request_document_symbols, request_implementation,
-  request_outgoing_calls, request_incoming_calls, etc.
+Phase 1 strategy: multilspy's documented public API surface is
+`request_definition`, `request_references`, `request_document_symbols`,
+`request_hover`, `request_completions` (verified against the package README).
+There is NO documented `request_outgoing_calls` / `callHierarchy` method on
+the SyncLanguageServer surface. This bridge therefore does NOT use call
+hierarchy. Instead, tree-sitter produces tentative CALLS edges (extractor),
+and this bridge only refines USES_TYPE / IMPLEMENTS / REFERENCES via
+`request_definition` + `request_document_symbols`.
+
+If/when call-hierarchy lands in multilspy, extend this bridge to upgrade
+CALLS edges from `tree-sitter` to `lsp` source.
 """
 import json
 import sys
 import traceback
-from pathlib import Path
 
 try:
     from multilspy import SyncLanguageServer
@@ -2477,9 +2614,19 @@ def emit(payload):
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
 
+def _selection_start(sym):
+    """LSP DocumentSymbol uses `selectionRange` for the name span;
+    SymbolInformation uses `location.range`. Be defensive."""
+    sel = sym.get("selectionRange") or sym.get("range")
+    if sel and "start" in sel:
+        return sel["start"]
+    loc = sym.get("location", {})
+    rng = loc.get("range") or {}
+    return rng.get("start")
+
 class BridgeState:
     def __init__(self):
-        self.servers = {}  # (repo_root, language) -> server context manager state
+        self.servers = {}  # (repo_root, language) -> (server, cm)
 
     def get_server(self, repo_root: str, language: str):
         key = (repo_root, language)
@@ -2494,31 +2641,44 @@ class BridgeState:
         return self.servers[key][0]
 
     def edges_for_file(self, repo_root: str, language: str, path: str):
+        """Refine extractor edges using LSP definition lookups.
+
+        For Phase 1, the bridge produces:
+        - REFERENCES edges from each documentSymbol to symbols it references
+          (resolved via request_definition at each name position).
+
+        CALLS edges are NOT produced here in v0 — multilspy's documented
+        public API does not expose call hierarchy. The tree-sitter extractor
+        produces heuristic CALLS edges; LSP refinement of those is deferred
+        until multilspy adds call-hierarchy support.
+        """
         server = self.get_server(repo_root, language)
         edges = []
         partial = False
         try:
-            doc_symbols, _ = server.request_document_symbols(path) or ([], [])
-            # symbols structure varies; treat gracefully
+            doc_symbols = server.request_document_symbols(path)
+            # Some multilspy versions return a tuple, others a list; normalize.
+            if isinstance(doc_symbols, tuple):
+                doc_symbols = doc_symbols[0]
             for sym in (doc_symbols or []):
                 name = sym.get("name") if isinstance(sym, dict) else None
-                if not name: continue
-                # Outgoing calls (CALLS edges from this symbol)
+                if not name:
+                    continue
+                start = _selection_start(sym)
+                if not start:
+                    continue
                 try:
-                    ranges = sym.get("range") or sym.get("location", {}).get("range")
-                    if ranges:
-                        line = ranges["start"]["line"]
-                        char = ranges["start"]["character"]
-                        prep = server.request_outgoing_calls(path, line, char)
-                        for outc in (prep or []):
-                            target = outc.get("to", {}).get("name") if isinstance(outc, dict) else None
-                            if target:
-                                edges.append({
-                                    "from": f"{path}::{name}",
-                                    "to": target,
-                                    "kind": "calls",
-                                    "source": "lsp",
-                                })
+                    defs = server.request_definition(path, start["line"], start["character"])
+                    for d in (defs or []):
+                        target_uri = d.get("uri") or d.get("targetUri")
+                        if not target_uri:
+                            continue
+                        edges.append({
+                            "from": f"{path}::{name}",
+                            "to": target_uri,
+                            "kind": "references",
+                            "source": "lsp",
+                        })
                 except Exception:
                     partial = True
         except Exception:
@@ -2602,11 +2762,17 @@ async fn lsp_smoke_typescript() {
     let resolver = MultilspyResolver::spawn(
         "python3 scripts/multilspy_bridge.py",
         repo.clone(),
-    ).await.unwrap();
-    let path: Utf8PathBuf = "tests/fixtures/typescript/simple_function.ts".into();
+    ).await.expect("spawn multilspy");
+    let path: Utf8PathBuf = "tests/fixtures/typescript/imports_and_exports.ts".into();
     let extraction = mycel_extract::ExtractionOutput::default();
-    let edges = resolver.refine(&path, "typescript", &extraction).await.unwrap();
+    let edges = resolver.refine(&path, "typescript", &extraction).await
+        .expect("refine returns Ok even when partial");
     eprintln!("got {} edges", edges.len());
+    // Real assertion: imports_and_exports.ts has at least one definition
+    // (`add` from ./simple_function) that LSP should resolve. If we get zero,
+    // the bridge or multilspy is broken and the test should fail loudly,
+    // not pass with eprintln.
+    assert!(!edges.is_empty(), "expected at least one LSP edge from a TS fixture with cross-file references");
 }
 ```
 
@@ -2765,19 +2931,18 @@ Note: `mycel-lsp` needs `mycel-extract` as a dep so the `refine` signature can t
 - [ ] **Step 4: Wire `src/lib.rs`**
 
 ```rust
+//! mycel-lsp — Phase 1 ships only the multilspy-backed resolver.
+//!
+//! A `Resolver` trait abstraction is intentionally NOT defined here. Phase 1
+//! has exactly one resolver implementation; introducing a trait for one impl
+//! is premature. When a second resolver lands (native Rust LSP client, or a
+//! mock for testing without Python), extract the trait at that point. Until
+//! then, callers depend on `MultilspyResolver` directly.
+
 pub mod multilspy;
 pub mod protocol;
 
 pub use multilspy::MultilspyResolver;
-
-pub trait Resolver: Send + Sync {
-    fn refine(
-        &self,
-        path: &camino::Utf8Path,
-        language: &str,
-        extraction: &mycel_extract::ExtractionOutput,
-    ) -> impl std::future::Future<Output = mycel_core::Result<Vec<mycel_core::Edge>>> + Send;
-}
 ```
 
 - [ ] **Step 5: Run smoke test (gated)**
@@ -2923,6 +3088,20 @@ impl Embedder for OllamaEmbedder {
             .map_err(|e| MycelError::Model { provider: self.identity.clone(), message: format!("status: {e}") })?
             .json().await
             .map_err(|e| MycelError::Model { provider: self.identity.clone(), message: format!("json: {e}") })?;
+        // Validate dimension matches the embedder's declared dimension. If
+        // the model returns a different dimension, fail loudly here rather
+        // than letting a corrupt vector reach the FalkorDB vector index.
+        if let Some(first) = resp.embeddings.first() {
+            if first.len() as u32 != self.dimension {
+                return Err(MycelError::Model {
+                    provider: self.identity.clone(),
+                    message: format!(
+                        "embedding dimension mismatch: model returned {} but embedder declares {}",
+                        first.len(), self.dimension
+                    ),
+                });
+            }
+        }
         Ok(resp.embeddings)
     }
 }
@@ -2973,7 +3152,61 @@ End of Chunk 5.
 - Create: `crates/mycel-index/src/pipeline.rs`
 - Create: `crates/mycel-index/src/dedup.rs`
 
-- [ ] **Step 1: Write `src/dedup.rs`**
+- [ ] **Step 0: Add `File`-record + symbol-embedding methods to `mycel-graph`**
+
+Per the workspace convention "**`mycel-graph`** — Sole owner of Cypher and FalkorDB. No other crate touches them," these helpers belong in `mycel-graph`, not in `mycel-index`. Add them in a new file `crates/mycel-graph/src/file.rs`:
+
+```rust
+use crate::{GraphClient, symbol};
+use falkordb::FalkorValue;
+use camino::Utf8Path;
+use mycel_core::*;
+
+impl GraphClient {
+    /// Returns the stored content_hash for a File node, if any.
+    pub async fn file_content_hash(&self, path: &Utf8Path) -> Result<Option<String>> {
+        let cypher = format!(
+            "MATCH (f:File {{path: '{}'}}) RETURN f.content_hash",
+            symbol::escape(path.as_str())
+        );
+        let rows = self.query(&cypher).await?;
+        Ok(rows.into_iter().next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v { FalkorValue::String(s) => Some(s), _ => None }))
+    }
+
+    pub async fn upsert_file_record(
+        &self, path: &Utf8Path, language: &str, content_hash: &str,
+    ) -> Result<()> {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let cypher = format!(
+            "MERGE (f:File {{path: '{path}'}}) SET f.language='{lang}', f.content_hash='{hash}', f.last_modified={ts}",
+            path = symbol::escape(path.as_str()),
+            lang = symbol::escape(language),
+            hash = symbol::escape(content_hash),
+            ts = now,
+        );
+        self.query(&cypher).await?;
+        Ok(())
+    }
+
+    /// Sets the embedding vector property on a Symbol node.
+    pub async fn set_symbol_embedding(&self, qualified_name: &str, vec: &[f32]) -> Result<()> {
+        let vec_lit = vec.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",");
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) SET s.embedding = vecf32([{v}])",
+            q = symbol::escape(qualified_name),
+            v = vec_lit,
+        );
+        self.query(&cypher).await?;
+        Ok(())
+    }
+}
+```
+
+Wire `pub mod file;` into `crates/mycel-graph/src/lib.rs`. Run `cargo build -p mycel-graph` to confirm clean.
+
+- [ ] **Step 1: Write `src/dedup.rs` (uses `mycel-graph` typed methods only)**
 
 ```rust
 use blake3::Hasher;
@@ -2989,32 +3222,13 @@ pub fn content_hash(content: &str) -> String {
 
 /// True if the file's stored hash equals `hash`.
 pub async fn is_unchanged(client: &GraphClient, path: &Utf8Path, hash: &str) -> Result<bool> {
-    let cypher = format!(
-        "MATCH (f:File {{path: '{}'}}) RETURN f.content_hash",
-        path.as_str().replace('\'', "\\'")
-    );
-    let rows = client.query(&cypher).await?;
-    let stored = rows.into_iter().next().and_then(|r| r.into_iter().next());
-    use falkordb::FalkorValue;
-    match stored {
-        Some(FalkorValue::String(s)) => Ok(s == hash),
-        _ => Ok(false),
-    }
+    Ok(client.file_content_hash(path).await? == Some(hash.to_string()))
 }
 
 pub async fn upsert_file_record(
     client: &GraphClient, path: &Utf8Path, language: &str, hash: &str,
 ) -> Result<()> {
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let cypher = format!(
-        "MERGE (f:File {{path: '{path}'}}) SET f.language='{lang}', f.content_hash='{hash}', f.last_modified={ts}",
-        path = path.as_str().replace('\'', "\\'"),
-        lang = language.replace('\'', "\\'"),
-        hash = hash,
-        ts = now,
-    );
-    client.query(&cypher).await?;
-    Ok(())
+    client.upsert_file_record(path, language, hash).await
 }
 ```
 
@@ -3069,19 +3283,25 @@ impl Indexer {
         self.graph.upsert_symbol_batch(&extraction.symbols).await?;
         self.graph.upsert_edge_batch(&all_edges).await?;
 
-        // 5. Embed signatures (Phase 1: signature-only)
+        // 5. Embed signatures (Phase 1: signature-only).
+        //
+        // CRITICAL: pair each symbol with its OWN embedding. The chunk-of-32
+        // batching means we must zip the symbol-chunk with the text-chunk,
+        // not zip `extraction.symbols.iter()` (which always restarts at 0)
+        // with the most recent batch's vectors.
         if !extraction.symbols.is_empty() {
             let texts: Vec<&str> = extraction.symbols.iter()
                 .map(|s| s.signature.as_str()).collect();
-            for chunk in texts.chunks(32) {
-                let vecs = self.embedder.embed(chunk).await?;
-                for (sym, vec) in extraction.symbols.iter().zip(vecs) {
-                    let cypher = format!(
-                        "MATCH (s:Symbol {{qualified_name: '{q}'}}) SET s.embedding = vecf32([{v}])",
-                        q = sym.qualified_name.as_str().replace('\'', "\\'"),
-                        v = vec.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(","),
-                    );
-                    self.graph.query(&cypher).await?;
+            for (sym_chunk, text_chunk) in extraction.symbols.chunks(32).zip(texts.chunks(32)) {
+                let vecs = self.embedder.embed(text_chunk).await?;
+                if vecs.len() != sym_chunk.len() {
+                    return Err(MycelError::Model {
+                        provider: self.embedder.identity().into(),
+                        message: format!("expected {} embeddings, got {}", sym_chunk.len(), vecs.len()),
+                    });
+                }
+                for (sym, vec) in sym_chunk.iter().zip(vecs.iter()) {
+                    self.graph.set_symbol_embedding(sym.qualified_name.as_str(), vec).await?;
                 }
             }
         }
@@ -3220,50 +3440,108 @@ git commit -m "Add Tier 1 queries and signature-only mycel find"
 
 ```rust
 //! Layered config loading: defaults -> ~/.config/mycel/config.toml -> <repo>/.mycel.toml -> env.
+//!
+//! Layered values use `Option<T>` to track presence; only `Some(...)` values
+//! from later layers replace earlier ones. Defaults are applied LAST when
+//! materializing the resolved config — so a `Default::default()` field on an
+//! intermediate layer never accidentally beats a real user/repo value.
 
 use mycel_core::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigLayer {
+    #[serde(default)] pub models: Option<ModelsConfig>,
+    #[serde(default)] pub storage: Option<StorageOverlay>,
+    #[serde(default)] pub providers: Option<ProvidersOverlay>,
+    #[serde(default)] pub lsp: Option<LspConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StorageOverlay {
+    #[serde(default)] pub falkordb_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProvidersOverlay {
+    #[serde(default)] pub embedder: Option<ProviderConfig>,
+    #[serde(default)] pub synthesizer: Option<ProviderConfig>,
+    #[serde(default)] pub reranker: Option<ProviderConfig>,
+}
+
+/// The fully resolved config used by the CLI/daemon. All fields are populated.
+#[derive(Debug, Clone)]
 pub struct Config {
-    #[serde(default)]
     pub models: ModelsConfig,
-    #[serde(default)]
     pub storage: StorageConfig,
-    #[serde(default)]
     pub providers: ProvidersConfig,
-    #[serde(default)]
     pub lsp: LspConfig,
 }
 
-pub fn load(repo: Option<&camino::Utf8Path>) -> Result<Config> {
-    let mut cfg = Config::default();
+fn merge(into: &mut ConfigLayer, from: ConfigLayer) {
+    if from.models.is_some() { into.models = from.models; }
+    if let Some(s) = from.storage {
+        let target = into.storage.get_or_insert_with(StorageOverlay::default);
+        if s.falkordb_url.is_some() { target.falkordb_url = s.falkordb_url; }
+    }
+    if let Some(p) = from.providers {
+        let target = into.providers.get_or_insert_with(ProvidersOverlay::default);
+        if p.embedder.is_some()    { target.embedder    = p.embedder; }
+        if p.synthesizer.is_some() { target.synthesizer = p.synthesizer; }
+        if p.reranker.is_some()    { target.reranker    = p.reranker; }
+    }
+    if from.lsp.is_some() { into.lsp = from.lsp; }
+}
 
+pub fn load(repo: Option<&camino::Utf8Path>) -> Result<Config> {
+    let mut layered = ConfigLayer::default();
+
+    // user-global
     if let Some(home) = std::env::var_os("HOME") {
-        let home: camino::Utf8PathBuf = camino::Utf8PathBuf::from_path_buf(home.into()).map_err(|_| MycelError::Config("non-utf8 HOME".into()))?;
+        let home: camino::Utf8PathBuf = camino::Utf8PathBuf::from_path_buf(home.into())
+            .map_err(|_| MycelError::Config("non-utf8 HOME".into()))?;
         let user = home.join(".config/mycel/config.toml");
         if user.exists() {
             let s = std::fs::read_to_string(&user)?;
-            cfg = toml::from_str(&s).map_err(|e| MycelError::Config(format!("user config: {e}")))?;
+            let parsed: ConfigLayer = toml::from_str(&s)
+                .map_err(|e| MycelError::Config(format!("user config: {e}")))?;
+            merge(&mut layered, parsed);
         }
     }
 
+    // per-repo
     if let Some(repo) = repo {
         let repo_cfg = repo.join(".mycel.toml");
         if repo_cfg.exists() {
             let s = std::fs::read_to_string(&repo_cfg)?;
-            let overlay: Config = toml::from_str(&s).map_err(|e| MycelError::Config(format!("repo config: {e}")))?;
-            // shallow merge
-            if overlay.models.tier.is_some() { cfg.models = overlay.models; }
-            if !overlay.storage.falkordb_url.is_empty() { cfg.storage = overlay.storage; }
-            if overlay.providers.embedder.is_some() { cfg.providers.embedder = overlay.providers.embedder; }
-            if overlay.providers.synthesizer.is_some() { cfg.providers.synthesizer = overlay.providers.synthesizer; }
-            if overlay.providers.reranker.is_some() { cfg.providers.reranker = overlay.providers.reranker; }
+            let parsed: ConfigLayer = toml::from_str(&s)
+                .map_err(|e| MycelError::Config(format!("repo config: {e}")))?;
+            merge(&mut layered, parsed);
         }
     }
 
-    if let Ok(url) = std::env::var("MYCEL_FALKORDB_URL") { cfg.storage.falkordb_url = url; }
-    Ok(cfg)
+    // env overrides (highest precedence)
+    if let Ok(url) = std::env::var("MYCEL_FALKORDB_URL") {
+        layered.storage.get_or_insert_with(StorageOverlay::default).falkordb_url = Some(url);
+    }
+
+    // materialize with defaults last
+    let storage = StorageConfig {
+        falkordb_url: layered.storage.and_then(|s| s.falkordb_url)
+            .unwrap_or_else(|| "redis://localhost:6379".into()),
+    };
+    let providers_overlay = layered.providers.unwrap_or_default();
+    let providers = ProvidersConfig {
+        embedder:    providers_overlay.embedder,
+        synthesizer: providers_overlay.synthesizer,
+        reranker:    providers_overlay.reranker,
+    };
+    Ok(Config {
+        models: layered.models.unwrap_or_default(),
+        storage,
+        providers,
+        lsp: layered.lsp.unwrap_or_default(),
+    })
 }
 
 pub fn embedder_from_cfg(cfg: &Config) -> std::sync::Arc<dyn mycel_models::Embedder> {
@@ -3315,36 +3593,30 @@ pub fn print_find(hits: &[(Symbol, f32)], json: bool) {
 }
 ```
 
-- [ ] **Step 3: Write `src/main.rs`**
+- [ ] **Step 3a: Create `src/cli.rs` with the clap definitions**
+
+The clap enums must be reachable from both `main.rs` and `supervisor/`. Putting them in a dedicated module is cleaner than re-exporting through `main.rs`.
 
 ```rust
-mod config;
-mod output;
-mod supervisor;
-
-use anyhow::Context;
+// crates/mycel-cli/src/cli.rs
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
-use mycel_graph::GraphClient;
-use mycel_index::Indexer;
-use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "mycel", version)]
-struct Cli {
+pub struct Cli {
     /// Output as JSON
     #[arg(long, global = true)]
-    json: bool,
+    pub json: bool,
     /// Repo root for resolving .mycel.toml
     #[arg(long, global = true)]
-    repo: Option<Utf8PathBuf>,
+    pub repo: Option<Utf8PathBuf>,
     #[command(subcommand)]
-    command: Cmd,
+    pub command: Cmd,
 }
 
 #[derive(Subcommand)]
-enum Cmd {
+pub enum Cmd {
     Index { path: Utf8PathBuf },
     Callers { symbol: String },
     Callees { symbol: String },
@@ -3353,14 +3625,11 @@ enum Cmd {
     Uses { ty: String },
     Implements { iface: String },
     Find { query: String, #[arg(long, default_value_t = 8)] limit: usize },
-    Daemon {
-        #[command(subcommand)]
-        action: DaemonAction,
-    },
+    Daemon { #[command(subcommand)] action: DaemonAction },
 }
 
 #[derive(Subcommand)]
-enum DaemonAction {
+pub enum DaemonAction {
     Install,
     Uninstall,
     Start,
@@ -3369,6 +3638,24 @@ enum DaemonAction {
     Logs { #[arg(long)] follow: bool },
     Run,
 }
+```
+
+- [ ] **Step 3b: Write `src/main.rs`**
+
+```rust
+mod cli;
+mod config;
+mod output;
+mod supervisor;
+
+use anyhow::Context;
+use camino::Utf8PathBuf;
+use clap::Parser;
+use cli::{Cli, Cmd};
+use mycel_graph::GraphClient;
+use mycel_index::Indexer;
+use std::sync::Arc;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -3384,8 +3671,22 @@ async fn main() -> anyhow::Result<()> {
             let graph_name = format!("mycel:{}", repo_id_from_path(&path));
             let g = GraphClient::connect(&cfg.storage.falkordb_url, &graph_name).await?;
             let embedder = config::embedder_from_cfg(&cfg);
-            // Phase 1: skip LSP for `mycel index <path>` if no daemon — keep CLI fast
-            let indexer = Indexer { graph: g, lsp: None, embedder };
+            // LSP refinement runs even from `mycel index` so Tier 1 queries
+            // return correct results (CALLS edges with `source: lsp` are the
+            // authoritative ones; tree-sitter heuristics alone miss too many
+            // cases). First-run is slower as a result; that's acceptable for
+            // the v0 dogfood loop.
+            let canon: Utf8PathBuf = path.canonicalize_utf8().unwrap_or(path.clone());
+            let lsp = match mycel_lsp::MultilspyResolver::spawn(
+                &cfg.lsp.multilspy_path, canon.clone()
+            ).await {
+                Ok(r) => Some(Arc::new(r)),
+                Err(e) => {
+                    eprintln!("LSP unavailable, falling back to tree-sitter only: {e}");
+                    None
+                }
+            };
+            let indexer = Indexer { graph: g, lsp, embedder };
             let n = indexer.index_repo(&path).await?;
             println!("indexed {n} files");
         }
@@ -3430,10 +3731,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stable repo id derived from the canonical path, so two repos with the
+/// same final component (e.g. ~/work/foo and ~/personal/foo) don't collide.
+/// Format: `<basename>-<8 hex chars of blake3(canonical path)>`.
 fn repo_id_from_path(path: &camino::Utf8Path) -> String {
-    path.canonicalize_utf8()
-        .map(|p| p.file_name().unwrap_or("repo").to_string())
-        .unwrap_or_else(|_| "repo".into())
+    let canon = path.canonicalize_utf8().unwrap_or_else(|_| path.to_path_buf());
+    let basename = canon.file_name().unwrap_or("repo");
+    let hash = blake3::hash(canon.as_str().as_bytes()).to_hex();
+    format!("{basename}-{}", &hash.as_str()[..8])
 }
 
 async fn open(cfg: &config::Config, repo: &Option<Utf8PathBuf>) -> anyhow::Result<GraphClient> {
@@ -3455,15 +3760,13 @@ Expected: clean (the supervisor module hasn't been written yet — add a stub).
 Create `crates/mycel-cli/src/supervisor/mod.rs`:
 
 ```rust
-use crate::DaemonAction;
+use crate::cli::DaemonAction;
 use anyhow::Result;
 
 pub async fn dispatch(_action: DaemonAction) -> Result<()> {
     anyhow::bail!("supervisor not yet implemented (Task 7.3)")
 }
 ```
-
-(`DaemonAction` needs to be `pub` in `main.rs` for this to work — adjust.)
 
 Re-run build: `cargo build -p mycel-cli`
 Expected: clean.
@@ -3644,7 +3947,7 @@ pub fn status() -> Result<()> {
 - [ ] **Step 5: Wire `src/supervisor/mod.rs`**
 
 ```rust
-use crate::DaemonAction;
+use crate::cli::DaemonAction;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;
@@ -3893,6 +4196,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# This script is NOT part of `cargo test --workspace` because it requires
+# FalkorDB + Ollama + multilspy installed on the host. Run manually after
+# `just bootstrap`.
+
 # 1. Index the Mycelium repo itself (Rust dogfood).
 echo "→ Indexing self..."
 cargo run -p mycel-cli --release -- --repo . index .
@@ -3904,19 +4211,21 @@ cargo run -p mycel-cli --release -- --repo . callers Indexer
 echo "→ Finding 'index a file with the parser'..."
 cargo run -p mycel-cli --release -- --repo . find "index a file with the parser"
 
-# 3. Index a small TS repo (cloned to /tmp).
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
-echo "→ Cloning a small TS fixture repo to $TMPDIR..."
-git clone --depth 1 https://github.com/sindresorhus/is.git "$TMPDIR/is"
+# 3. Index the vendored TS fixture (no network dependency).
+TS_FIXTURE="tests/fixtures/external/ts-sample"
+if [ ! -d "$TS_FIXTURE" ]; then
+  echo "TS fixture missing at $TS_FIXTURE — vendor a small TS project there before running e2e" >&2
+  echo "(suggested: clone a small TS lib once, drop node_modules + .git, commit the source)" >&2
+  exit 1
+fi
 
-cargo run -p mycel-cli --release -- --repo "$TMPDIR/is" index "$TMPDIR/is"
-cargo run -p mycel-cli --release -- --repo "$TMPDIR/is" find "type-checking utility"
+cargo run -p mycel-cli --release -- --repo "$TS_FIXTURE" index "$TS_FIXTURE"
+cargo run -p mycel-cli --release -- --repo "$TS_FIXTURE" find "type-checking utility"
 
 echo "→ E2E PASS"
 ```
 
-(`sindresorhus/is` is a small, well-typed TS lib; substitute any small TS repo.)
+The vendored fixture lives in-repo so the e2e is reproducible and works offline. Pick any small, well-typed TS lib (a few hundred lines, multiple files, no build step needed) and commit just the source files. `tests/fixtures/external/ts-sample/README.md` should record where it was sourced from.
 
 - [ ] **Step 2: Run end-to-end**
 
