@@ -51,7 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 clap = { version = "4", features = ["derive"] }
 # misc
 blake3 = "1"
-time = { version = "0.3", features = ["serde", "formatting"] }
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting"] }
 # test
 insta = { version = "1", features = ["json", "yaml"] }
 proptest = "1"
