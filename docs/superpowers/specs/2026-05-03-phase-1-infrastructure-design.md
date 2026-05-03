@@ -76,7 +76,11 @@ mycelium/
 
 **`mycel-graph`** — Sole owner of Cypher and FalkorDB. No other crate touches them.
 - Public API: `GraphClient::connect`, `upsert_symbol`, `upsert_edge_batch`, `query_callers`, `query_callees`, `query_imports`, `query_uses`, `query_implements`, `query_definers`, `vector_search_top_k`, `read_manifest`, `write_manifest`.
-- Schema migrations: an idempotent `migrations/` module that runs index/constraint creation on connect. Tracked via a small `MigrationRecord` graph node.
+- **All FalkorDB operations are issued as raw Cypher strings via the `falkordb` crate's `graph.query(...).execute()` interface.** The crate (v0.2.1) does *not* provide typed vector index methods or typed schema-migration helpers — `mycel-graph` builds those itself. Vector index creation is `CREATE VECTOR INDEX FOR (s:Symbol) ON (s.embedding) OPTIONS {dimension: 768, similarityFunction: 'cosine'}`. Vector queries are `CALL db.idx.vector.queryNodes(...) YIELD node, score`. The `vector_search_top_k` and similar typed methods on `GraphClient` are thin Rust wrappers that compose Cypher and parse results — they are *not* delegates to crate-provided abstractions.
+- **Schema migrations** live in a `migrations/` module. Each migration has a stable string ID (e.g., `"v1_symbol_indices"`, `"v2_vector_index"`). On `GraphClient::connect`, run all migrations whose ID isn't recorded in the meta-graph. Migration application is idempotent (uses `IF NOT EXISTS` clauses where Cypher allows and inert checks otherwise).
+- **Meta-graph (`mycel:meta`).** Separate from the per-repo graphs. Holds two node types:
+  - `MigrationRecord { migration_id: string, applied_at: timestamp }` — one per applied migration.
+  - `IndexManifest { repo_id, embedder_identity, embedder_dimension, schema_version, last_indexed_at }` — one per indexed repo. Read on connect, written after each successful index pass. `vector_search_top_k` validates that the connecting embedder's identity/dimension matches the manifest before issuing the search.
 - Deps: `falkordb` (with `tokio` + `tracing` features), `tokio`, `tracing`, `mycel-core`.
 
 **`mycel-extract`** — Tree-sitter integration, per-language extractors.
@@ -170,7 +174,7 @@ Runs natively on the dev machine (not containerized — containerized Ollama on 
 
 Python subprocess. Bootstrap verifies `python3` is available and runs `pip install --user multilspy` (or `pipx install multilspy` if available). The bridge script (`scripts/multilspy_bridge.py`) is part of the repo — the daemon spawns it with `python3 scripts/multilspy_bridge.py`.
 
-The bridge protocol is JSON-line over stdin/stdout:
+**Bridge protocol** is JSON-line over stdin/stdout:
 
 ```
 → {"op": "edges_for_file", "path": "src/foo.ts", "id": 1}
@@ -178,6 +182,19 @@ The bridge protocol is JSON-line over stdin/stdout:
 ```
 
 The daemon multiplexes requests with `id` correlation; the bridge processes one request at a time per language (multilspy's own concurrency model).
+
+**`edges_for_file` is a custom aggregation built inside the bridge script.** multilspy itself exposes only standard LSP request methods (`request_definition`, `request_references`, `request_document_symbols`, `request_hover`, optionally `callHierarchy/incomingCalls` and `callHierarchy/outgoingCalls` where supported). The bridge script implements the high-level `edges_for_file` operation by stitching multiple LSP requests together per symbol:
+
+| Edge kind | LSP request(s) used |
+|---|---|
+| `CALLS` | `textDocument/documentSymbol` to enumerate symbols, then `callHierarchy/prepareCallHierarchy` + `callHierarchy/outgoingCalls` per symbol. Falls back to `textDocument/definition` over each call site identifier when call hierarchy isn't supported by the server. |
+| `USES_TYPE` | `textDocument/documentSymbol` for symbols carrying type annotations, then `textDocument/definition` per type identifier in the signature. |
+| `IMPLEMENTS` | `textDocument/implementation` on each declaration LSP marks as a class/trait. |
+| `IMPORTS` | parsed from tree-sitter (LSP doesn't expose imports cleanly across servers); LSP only consulted to resolve the imported identifier's declaration site. |
+
+The bridge script's job is to encapsulate this stitching logic so `mycel-lsp` (Rust) deals only with the high-level `edges_for_file` request/response shape. If a particular LSP method isn't available for a configured server, the bridge degrades gracefully (returns the edges it could resolve and a `partial: true` flag).
+
+**Implementation note for the agent:** start by writing the bridge for `tsserver` only (which supports call hierarchy fully), get the round-trip working end-to-end, then add `rust-analyzer` (also supports call hierarchy). Don't try to be polyglot in v0 — the protocol is the contract; per-language stitching can vary.
 
 ### Bootstrap script
 
@@ -284,7 +301,7 @@ State directories (XDG):
 
 - `~/.config/mycel/` — config files.
 - `~/.local/share/mycel/<repo-id>/` — per-repo derived data (Phase 5+ conventions/style files).
-- `~/.cache/mycel/` — daemon logs, content-hash maps, retrieval logs.
+- `~/.cache/mycel/` — daemon logs and (Phase 4+) retrieval logs. Content hashes live on `File` nodes in the graph itself — no disk duplication.
 
 ### Justfile
 
@@ -322,7 +339,7 @@ lint:
 
 ### Daemon supervisor (cross-platform)
 
-The daemon must run as a long-lived background process across both macOS and Linux from day one — Mycelium's author works on both platforms and the dev experience needs to be uniform. v0 ships first-class supervisor integration:
+**Why this is Phase 1 scope, not deferred.** The author develops on both an M1 Mac laptop and a Linux workstation; both machines must run Mycelium against the same project files (potentially via syncing) without per-platform setup gymnastics. More importantly, the dogfood feedback loop requires the daemon to actually be *running in the background* while the agent edits the Mycelium source itself — without supervisor integration, the user is constantly babysitting `mycel daemon run` in a terminal tab, which defeats the "ambient code intelligence" experience the project is meant to deliver. Foreground-only mode is sufficient to *test* the pipeline but not sufficient to *use* it. v0 ships first-class supervisor integration:
 
 **Commands:**
 - `mycel daemon install` — auto-detects platform, writes the appropriate service file, registers it with the platform's supervisor.
@@ -395,9 +412,10 @@ The supervisor templates live as resource strings inside `mycel-cli` (compiled i
 ```
 File change event (notify)
   → Debounce 2s
-  → Read file content + compute content_hash
-  → Skip if hash matches stored hash
-  → Tree-sitter extract (mycel-extract::TypeScriptExtractor)
+  → Read file content + compute content_hash (blake3)
+  → Query graph: MATCH (f:File {path: $path}) RETURN f.content_hash
+  → Skip if hash matches; otherwise continue
+  → Tree-sitter extract (mycel-extract dispatches by extension)
        → Symbols + tentative edges (source: TreeSitter)
   → multilspy refine (mycel-lsp::MultilspyResolver)
        → Refined edges (source: Lsp), if language is configured for LSP
