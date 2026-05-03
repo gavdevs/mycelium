@@ -2813,9 +2813,12 @@ pub struct RawEdge {
 }
 ```
 
-- [ ] **Step 3: Implement `src/multilspy.rs`**
+Note: `mycel-lsp` needs `mycel-extract` as a dep so the `refine` signature can take `&mycel_extract::ExtractionOutput`. Add `mycel-extract = { path = "../mycel-extract" }` to `crates/mycel-lsp/Cargo.toml` BEFORE the steps below.
+
+- [ ] **Step 3a: Skeleton — struct, fields, common imports**
 
 ```rust
+// crates/mycel-lsp/src/multilspy.rs
 use crate::protocol::*;
 use camino::Utf8PathBuf;
 use mycel_core::*;
@@ -2835,7 +2838,15 @@ pub struct MultilspyResolver {
     repo_root: Utf8PathBuf,
     _child: Child,
 }
+```
 
+Run `cargo build -p mycel-lsp`. Expected: clean (struct only; no impl yet).
+
+- [ ] **Step 3b: `spawn` constructor + reader-loop wiring**
+
+Append to `multilspy.rs`:
+
+```rust
 impl MultilspyResolver {
     pub async fn spawn(cmd: &str, repo_root: Utf8PathBuf) -> Result<Self> {
         let mut parts = cmd.split_whitespace();
@@ -2863,7 +2874,35 @@ impl MultilspyResolver {
             _child: child,
         })
     }
+}
 
+async fn reader_loop(
+    stdout: ChildStdout,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>>,
+) {
+    let mut reader = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = reader.next_line().await {
+        debug!(line = %line, "bridge response");
+        match serde_json::from_str::<EdgesForFileResp>(&line) {
+            Ok(resp) => {
+                if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                    let _ = tx.send(resp);
+                }
+            }
+            Err(e) => warn!(error = %e, line = %line, "could not parse bridge response"),
+        }
+    }
+}
+```
+
+Run `cargo build -p mycel-lsp`. Expected: clean (now spawnable but `refine` still missing).
+
+- [ ] **Step 3c: `refine` method (request/response round-trip + edge mapping)**
+
+Append:
+
+```rust
+impl MultilspyResolver {
     pub async fn refine(
         &self,
         path: &camino::Utf8Path,
@@ -2906,27 +2945,9 @@ impl MultilspyResolver {
         }).collect())
     }
 }
-
-async fn reader_loop(
-    stdout: ChildStdout,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>>,
-) {
-    let mut reader = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = reader.next_line().await {
-        debug!(line = %line, "bridge response");
-        match serde_json::from_str::<EdgesForFileResp>(&line) {
-            Ok(resp) => {
-                if let Some(tx) = pending.lock().await.remove(&resp.id) {
-                    let _ = tx.send(resp);
-                }
-            }
-            Err(e) => warn!(error = %e, line = %line, "could not parse bridge response"),
-        }
-    }
-}
 ```
 
-Note: `mycel-lsp` needs `mycel-extract` as a dep so the `refine` signature can take `&mycel_extract::ExtractionOutput`. Add `mycel-extract = { path = "../mycel-extract" }` to `crates/mycel-lsp/Cargo.toml`.
+Run `cargo build -p mycel-lsp`. Expected: clean (resolver now functional).
 
 - [ ] **Step 4: Wire `src/lib.rs`**
 
@@ -4049,6 +4070,30 @@ End of Chunk 7.
 - Modify: `crates/mycel-daemon/src/main.rs`
 - Create: `crates/mycel-daemon/src/watcher.rs`
 - Create: `crates/mycel-daemon/src/queue.rs`
+
+- [ ] **Step 0: Pin `notify` version exactly + verify imports compile**
+
+In the workspace `Cargo.toml`, change `notify = { version = "8", features = ["macos_fsevent"] }` to a pinned `version = "=8.2"` (or whatever 8.x is current). The notify 8 series has reorganized exports a couple of times; loose minor pinning has bitten downstream crates.
+
+Run a tiny check: add `crates/mycel-daemon/tests/notify_imports.rs`:
+
+```rust
+use notify::{recommended_watcher, RecursiveMode, EventKind};
+
+#[test]
+fn imports_compile() {
+    // Just verifies the items above resolve under the pinned notify
+    // version. If this fails, the watcher source needs fixups before
+    // proceeding.
+    let _ = (RecursiveMode::Recursive, EventKind::Modify(notify::event::ModifyKind::Any));
+    fn _coerce<F: Fn(notify::Result<notify::Event>) + Send + 'static>(_f: F) {}
+    _coerce(|_| {});
+    let _ = recommended_watcher::<fn(notify::Result<notify::Event>)>;
+}
+```
+
+Run: `cargo test -p mycel-daemon --test notify_imports`
+Expected: PASS. If not, consult the notify 8.x changelog for renamed exports.
 
 - [ ] **Step 1: Write `src/watcher.rs`**
 
