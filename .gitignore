@@ -1,4 +1,8 @@
-.worktrees/
-target/
-*.swp
+/target
+**/*.swp
 .DS_Store
+.env
+.env.local
+.mycel/
+*.log
+.worktrees/
