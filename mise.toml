@@ -1,0 +1,10 @@
+# mise.toml — pinned dev-tool versions for the Mycelium workspace.
+# Run `mise install` (called by scripts/bootstrap.sh) to materialize.
+#
+# Rust is intentionally NOT managed by mise. The rustup toolchain
+# pinned in rust-toolchain.toml is the source of truth; cargo and
+# rustc resolve through rustup, not mise.
+
+[tools]
+python = "3.12"
+just = "1.50.0"
