@@ -11,4 +11,8 @@ rust-version.workspace = true
 falkordb = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+time = { workspace = true }
 mycel-core = { path = "../mycel-core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
