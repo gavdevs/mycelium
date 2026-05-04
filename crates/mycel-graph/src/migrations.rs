@@ -19,6 +19,13 @@ const MIGRATIONS: &[(&str, &[&str])] = &[
             "CREATE VECTOR INDEX FOR (s:Symbol) ON (s.embedding) OPTIONS {dimension: 768, similarityFunction: 'cosine'}",
         ],
     ),
+    (
+        "v2_name_index",
+        &[
+            // Indexes the short name (last `::` or `.` segment) used by query_definers.
+            "CREATE INDEX FOR (s:Symbol) ON (s.name)",
+        ],
+    ),
 ];
 
 pub async fn run_all(client: &GraphClient) -> Result<()> {
