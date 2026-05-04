@@ -270,3 +270,119 @@ fn clean_description(raw: &str) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_description_strips_echoed_prefix() {
+        assert_eq!(
+            clean_description("Description: Validates a JWT token."),
+            "Validates a JWT token."
+        );
+        assert_eq!(
+            clean_description("description: Picks a tier."),
+            "Picks a tier."
+        );
+    }
+
+    #[test]
+    fn clean_description_strips_surrounding_quotes() {
+        assert_eq!(
+            clean_description("\"Returns the canonical path.\""),
+            "Returns the canonical path."
+        );
+    }
+
+    #[test]
+    fn clean_description_handles_combined_artifacts() {
+        // Trim outer whitespace, strip the echoed prefix, then strip the
+        // surrounding quotes the prefix was hiding. Both passes apply.
+        assert_eq!(
+            clean_description("   Description: \"Logs a warning.\"   "),
+            "Logs a warning."
+        );
+    }
+
+    #[test]
+    fn clean_description_passthrough_for_clean_input() {
+        assert_eq!(
+            clean_description("Validates input and returns the parsed token."),
+            "Validates input and returns the parsed token."
+        );
+    }
+
+    #[test]
+    fn build_prompt_includes_signature_and_neighbors() {
+        let sym = SymbolForSynthesis {
+            qualified_name: "foo::bar".into(),
+            signature: "fn bar(x: u32) -> u32".into(),
+            file_path: "foo.rs".into(),
+            start_line: 1,
+            end_line: 3,
+            has_description: false,
+        };
+        let ctx = SynthesisContext {
+            callers: vec![mycel_graph::symbol::SymbolNeighbor {
+                qualified_name: "foo::caller".into(),
+                signature: "fn caller()".into(),
+            }],
+            callees: vec![mycel_graph::symbol::SymbolNeighbor {
+                qualified_name: "foo::callee".into(),
+                signature: "fn callee(y: u32)".into(),
+            }],
+        };
+        let prompt = build_prompt(&sym, Some("fn bar(x: u32) -> u32 { x + 1 }"), &ctx);
+        // Sanity checks — the prompt should reference the symbol, both
+        // neighbors, and end with the "Description:" cue that elicits the
+        // completion. Don't assert on the exact phrasing of the system
+        // instructions; that's stylistic and free to evolve.
+        assert!(prompt.contains("foo::bar"));
+        assert!(prompt.contains("fn bar(x: u32) -> u32"));
+        assert!(prompt.contains("foo::caller"));
+        assert!(prompt.contains("foo::callee"));
+        assert!(prompt.trim_end().ends_with("Description:"));
+    }
+
+    #[test]
+    fn read_body_slice_caps_long_bodies() {
+        let dir = tempdir_for_test();
+        let p = dir.join("big.rs");
+        let content: String = (1..=200)
+            .map(|i| format!("line{i}\n"))
+            .collect();
+        std::fs::write(&p, &content).unwrap();
+
+        let mut cache = HashMap::new();
+        let body = read_body_slice(&mut cache, p.to_str().unwrap(), 1, 200).unwrap();
+        // Should include the truncation marker since 200 > BODY_LINE_CAP.
+        assert!(body.contains("(body truncated)"));
+        // First line preserved.
+        assert!(body.starts_with("line1"));
+    }
+
+    #[test]
+    fn read_body_slice_handles_missing_file() {
+        let mut cache = HashMap::new();
+        let body = read_body_slice(&mut cache, "/nonexistent/path.rs", 1, 10);
+        assert!(body.is_none());
+        // Subsequent calls hit the cache (None is cached).
+        let body2 = read_body_slice(&mut cache, "/nonexistent/path.rs", 1, 10);
+        assert!(body2.is_none());
+    }
+
+    fn tempdir_for_test() -> std::path::PathBuf {
+        // Use the OS temp dir + a unique-ish suffix; avoids pulling in the
+        // tempfile crate just for these unit tests. Cleanup is best-effort.
+        let dir = std::env::temp_dir().join(format!(
+            "mycel-synth-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}
