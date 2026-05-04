@@ -299,17 +299,33 @@ impl GraphClient {
         Ok(SynthesisContext { callers, callees })
     }
 
-    /// Writes the synthesized description on a Symbol node. Idempotent —
-    /// running twice with the same description is a no-op at the FalkorDB
-    /// level. Note: the v1_vector_index migration only indexes nodes that
-    /// have an `embedding` property; this method does not touch the embedding
-    /// (the indexer re-embeds the description separately via
-    /// `set_symbol_embedding`).
-    pub async fn set_symbol_description(&self, qname: &str, description: &str) -> Result<()> {
+    /// Writes the synthesized description AND its embedding on a Symbol node
+    /// in a single Cypher statement. Atomic at the query boundary — either
+    /// both land or neither does, so a partially-described node can never
+    /// slip past `list_symbols_for_synthesis(only_missing=true)` on re-runs.
+    ///
+    /// (An earlier draft split this into `set_symbol_description` followed
+    /// by `set_symbol_embedding`; if the second call failed the node carried
+    /// the new description but its old, signature-derived embedding, and
+    /// `only_missing` would skip it forever absent `--force`. Bundling fixes
+    /// that class of inconsistency at the source.)
+    pub async fn set_symbol_description_and_embedding(
+        &self,
+        qname: &str,
+        description: &str,
+        embedding: &[f32],
+    ) -> Result<()> {
+        let vec_lit = embedding
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let cypher = format!(
-            "MATCH (s:Symbol {{qualified_name: '{q}'}}) SET s.synthesized_description = '{d}'",
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             SET s.synthesized_description = '{d}', s.embedding = vecf32([{v}])",
             q = escape(qname),
             d = escape(description),
+            v = vec_lit,
         );
         self.query(&cypher).await?;
         Ok(())

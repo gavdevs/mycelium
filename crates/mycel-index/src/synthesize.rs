@@ -151,13 +151,16 @@ pub async fn synthesize_descriptions(
     while let Some(result) = stream.next().await {
         match result {
             Ok((qname, description, vec)) => {
-                if let Err(e) = graph.set_symbol_description(&qname, &description).await {
-                    warn!(qname = %qname, error = %e, "write description failed");
-                    failed += 1;
-                    continue;
-                }
-                if let Err(e) = graph.set_symbol_embedding(&qname, &vec).await {
-                    warn!(qname = %qname, error = %e, "write description-embedding failed");
+                // Atomic write: description + embedding land together or not
+                // at all. A separate description+embedding pair could leave
+                // a node with a fresh description and a stale, signature-
+                // derived embedding that subsequent `only_missing` filters
+                // would silently skip.
+                if let Err(e) = graph
+                    .set_symbol_description_and_embedding(&qname, &description, &vec)
+                    .await
+                {
+                    warn!(qname = %qname, error = %e, "write description+embedding failed");
                     failed += 1;
                     continue;
                 }
@@ -363,13 +366,23 @@ mod tests {
     }
 
     #[test]
-    fn read_body_slice_handles_missing_file() {
+    fn read_body_slice_handles_missing_file_and_caches_negative() {
+        let dir = tempdir_for_test();
+        let path = dir.join("not-yet.rs");
+        let path_str = path.to_str().unwrap();
+
         let mut cache = HashMap::new();
-        let body = read_body_slice(&mut cache, "/nonexistent/path.rs", 1, 10);
-        assert!(body.is_none());
-        // Subsequent calls hit the cache (None is cached).
-        let body2 = read_body_slice(&mut cache, "/nonexistent/path.rs", 1, 10);
-        assert!(body2.is_none());
+        // First call: file doesn't exist, expect None.
+        assert!(read_body_slice(&mut cache, path_str, 1, 10).is_none());
+
+        // Now create the file. A non-caching implementation would re-read
+        // it and return Some(...) on the second call; the caching one
+        // remembers None and short-circuits.
+        std::fs::write(&path, "let x = 1;\n").unwrap();
+        assert!(
+            read_body_slice(&mut cache, path_str, 1, 10).is_none(),
+            "negative result should be cached even after the file appears"
+        );
     }
 
     fn tempdir_for_test() -> std::path::PathBuf {
