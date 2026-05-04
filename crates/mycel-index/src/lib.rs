@@ -6,5 +6,7 @@
 
 pub mod dedup;
 pub mod pipeline;
+pub mod synthesize;
 
 pub use pipeline::Indexer;
+pub use synthesize::{SynthesisOptions, SynthesisOutcome, synthesize_descriptions};

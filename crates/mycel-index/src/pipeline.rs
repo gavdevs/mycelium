@@ -3,7 +3,7 @@ use mycel_core::*;
 use mycel_extract::for_language;
 use mycel_graph::GraphClient;
 use mycel_lsp::MultilspyResolver;
-use mycel_models::Embedder;
+use mycel_models::{Embedder, Synthesizer};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -11,6 +11,11 @@ pub struct Indexer {
     pub graph: GraphClient,
     pub lsp: Option<Arc<MultilspyResolver>>,
     pub embedder: Arc<dyn Embedder>,
+    /// Phase 2 description synthesizer. `None` on the daemon's incremental
+    /// path (per-file edits don't pay the LLM cost on every save) and on
+    /// `mycel index --no-descriptions`. When `Some`, `index_repo` runs a
+    /// final synthesis pass that re-embeds every symbol on its description.
+    pub synthesizer: Option<Arc<dyn Synthesizer>>,
 }
 
 impl Indexer {
@@ -205,6 +210,28 @@ impl Indexer {
             last_indexed_at: time::OffsetDateTime::now_utc(),
         };
         self.graph.write_manifest(&manifest).await?;
+
+        // Phase 2: description synthesis as a final pass. Runs only when a
+        // synthesizer is configured (i.e., not on the daemon's per-file
+        // path). Re-embeds each described symbol on its description so
+        // vector search clusters by behavior — this is where retrieval
+        // quality jumps over Phase 1's signature-only embeddings.
+        if let Some(synth) = &self.synthesizer {
+            let outcome = crate::synthesize::synthesize_descriptions(
+                &self.graph,
+                synth.clone(),
+                self.embedder.clone(),
+                crate::synthesize::SynthesisOptions::default(),
+            )
+            .await?;
+            info!(
+                considered = outcome.considered,
+                synthesized = outcome.synthesized,
+                skipped = outcome.skipped,
+                failed = outcome.failed,
+                "phase 2 synthesis pass complete"
+            );
+        }
 
         Ok(count)
     }

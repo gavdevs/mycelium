@@ -16,7 +16,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    Index { path: Utf8PathBuf },
+    Index {
+        path: Utf8PathBuf,
+        /// Skip the Phase 2 description-synthesis pass at the end of indexing.
+        /// Use this for fast cold first-indexes where signature embeddings are
+        /// good enough; you can run `mycel synthesize` later to upgrade.
+        #[arg(long)]
+        no_descriptions: bool,
+    },
     Callers { symbol: String },
     Callees { symbol: String },
     Definers { name: String },
@@ -24,6 +31,15 @@ pub enum Cmd {
     Uses { ty: String },
     Implements { iface: String },
     Find { query: String, #[arg(long, default_value_t = 8)] limit: usize },
+    /// Run only the Phase 2 description-synthesis pass on an already-indexed
+    /// graph. Idempotent — symbols with an existing description are skipped
+    /// unless `--force` is set.
+    Synthesize {
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Daemon { #[command(subcommand)] action: DaemonAction },
 }
 
