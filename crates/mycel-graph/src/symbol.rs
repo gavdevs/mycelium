@@ -5,6 +5,52 @@ use tracing::warn;
 use crate::GraphClient;
 use crate::cypher::escape;
 
+/// A Symbol surfaced for the description-synthesis pipeline. Carries the
+/// minimum the indexer needs to slice the body from disk and decide whether
+/// to skip (already described).
+#[derive(Debug, Clone)]
+pub struct SymbolForSynthesis {
+    pub qualified_name: String,
+    pub signature: String,
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub has_description: bool,
+}
+
+/// 1-hop graph neighborhood used to build a synthesis prompt.
+#[derive(Debug, Clone, Default)]
+pub struct SynthesisContext {
+    pub callers: Vec<SymbolNeighbor>,
+    pub callees: Vec<SymbolNeighbor>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SymbolNeighbor {
+    pub qualified_name: String,
+    pub signature: String,
+}
+
+fn parse_neighbor_rows(rows: Vec<Vec<FalkorValue>>) -> Vec<SymbolNeighbor> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => return None,
+            };
+            let signature = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => String::new(),
+            };
+            Some(SymbolNeighbor {
+                qualified_name: qname,
+                signature,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn short_name(qualified: &str) -> &str {
     qualified
         .rsplit_once("::")
@@ -166,6 +212,107 @@ impl GraphClient {
             })
             .unwrap_or(0);
         Ok(deleted)
+    }
+
+    /// Returns every Symbol's qualified_name + signature in this graph,
+    /// optionally filtered to those without a synthesized_description (the
+    /// common case for Phase 2 synthesis: only describe what hasn't been
+    /// described yet, so re-runs are idempotent and cheap).
+    ///
+    /// Result rows: (qualified_name, signature, file_path, start_line, end_line, has_description).
+    pub async fn list_symbols_for_synthesis(
+        &self,
+        only_missing: bool,
+    ) -> Result<Vec<SymbolForSynthesis>> {
+        // FalkorDB's Cypher dialect lacks `IS NULL` predicates on missing
+        // properties — non-existent properties evaluate to null, but the
+        // standard equality test against null returns null, not false. The
+        // safe pattern is `coalesce(s.synthesized_description, '') = ''`.
+        let filter = if only_missing {
+            "WHERE coalesce(s.synthesized_description, '') = ''"
+        } else {
+            ""
+        };
+        let cypher = format!(
+            "MATCH (s:Symbol) {filter} \
+             RETURN s.qualified_name, s.signature, s.file_path, s.start_line, s.end_line, \
+                    coalesce(s.synthesized_description, '') AS desc",
+        );
+        let rows = self.query(&cypher).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let signature = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => String::new(),
+            };
+            let file_path = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let start_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let end_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let has_description = matches!(iter.next(), Some(FalkorValue::String(s)) if !s.is_empty());
+            out.push(SymbolForSynthesis {
+                qualified_name: qname,
+                signature,
+                file_path,
+                start_line,
+                end_line,
+                has_description,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Returns 1-hop neighbors (callers + callees) for a symbol, with their
+    /// signatures only (not bodies). Used to build description-synthesis
+    /// prompts. Caps each side at `limit` to keep prompts under the small
+    /// model's effective context.
+    pub async fn query_synthesis_context(
+        &self,
+        qname: &str,
+        limit: usize,
+    ) -> Result<SynthesisContext> {
+        let callers_cypher = format!(
+            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol {{qualified_name: '{q}'}}) \
+             RETURN DISTINCT a.qualified_name, a.signature LIMIT {limit}",
+            q = escape(qname),
+        );
+        let callees_cypher = format!(
+            "MATCH (a:Symbol {{qualified_name: '{q}'}})-[:CALLS]->(b:Symbol) \
+             RETURN DISTINCT b.qualified_name, b.signature LIMIT {limit}",
+            q = escape(qname),
+        );
+        let callers = parse_neighbor_rows(self.query(&callers_cypher).await?);
+        let callees = parse_neighbor_rows(self.query(&callees_cypher).await?);
+        Ok(SynthesisContext { callers, callees })
+    }
+
+    /// Writes the synthesized description on a Symbol node. Idempotent —
+    /// running twice with the same description is a no-op at the FalkorDB
+    /// level. Note: the v1_vector_index migration only indexes nodes that
+    /// have an `embedding` property; this method does not touch the embedding
+    /// (the indexer re-embeds the description separately via
+    /// `set_symbol_embedding`).
+    pub async fn set_symbol_description(&self, qname: &str, description: &str) -> Result<()> {
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) SET s.synthesized_description = '{d}'",
+            q = escape(qname),
+            d = escape(description),
+        );
+        self.query(&cypher).await?;
+        Ok(())
     }
 
     pub async fn query_definers(&self, name: &str) -> Result<Vec<Symbol>> {
