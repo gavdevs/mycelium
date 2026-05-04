@@ -99,3 +99,61 @@ async fn edge_upsert_callers_query() {
         "expected crate::foo in callers, got {callers:?}"
     );
 }
+
+#[tokio::test]
+async fn imports_uses_implements_queries() {
+    let client = GraphClient::connect(&url(), "mycel:test:tier1").await.unwrap();
+    let foo = Symbol {
+        qualified_name: QualifiedName::new("ts::Foo"),
+        kind: SymbolKind::Class,
+        file_path: "src/foo.ts".into(),
+        start_line: 1,
+        end_line: 3,
+        signature: Signature::new("class Foo"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+    };
+    let i = Symbol {
+        qualified_name: QualifiedName::new("ts::IFoo"),
+        kind: SymbolKind::Interface,
+        file_path: "src/foo.ts".into(),
+        start_line: 5,
+        end_line: 6,
+        signature: Signature::new("interface IFoo"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+    };
+    client.upsert_symbol(&foo).await.unwrap();
+    client.upsert_symbol(&i).await.unwrap();
+    client
+        .upsert_edge_batch(&[Edge {
+            from: "ts::Foo".into(),
+            to: "ts::IFoo".into(),
+            kind: EdgeKind::Implements,
+            source: EdgeSource::Lsp,
+        }])
+        .await
+        .unwrap();
+    let impls = client.query_implements("ts::IFoo").await.unwrap();
+    assert!(impls.iter().any(|s| s.qualified_name.as_str() == "ts::Foo"));
+}
+
+#[tokio::test]
+async fn manifest_round_trip() {
+    let client = GraphClient::connect(&url(), "mycel:test:manifest").await.unwrap();
+    let m = IndexManifest {
+        repo_id: RepoId::new("test-repo"),
+        embedder_identity: "ollama/embeddinggemma".into(),
+        embedder_dimension: 768,
+        schema_version: SCHEMA_VERSION,
+        last_indexed_at: time::OffsetDateTime::now_utc(),
+    };
+    client.write_manifest(&m).await.unwrap();
+    let read = client.read_manifest("test-repo").await.unwrap().unwrap();
+    assert_eq!(read.embedder_identity, m.embedder_identity);
+    assert_eq!(read.embedder_dimension, 768);
+}

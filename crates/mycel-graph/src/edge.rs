@@ -28,7 +28,7 @@ impl GraphClient {
     pub async fn upsert_edge_batch(&self, edges: &[Edge]) -> Result<()> {
         for e in edges {
             let src_value =
-                serde_json::to_value(&e.source).expect("EdgeSource serializes infallibly");
+                serde_json::to_value(e.source).expect("EdgeSource serializes infallibly");
             let src_str = src_value
                 .as_str()
                 .expect("EdgeSource serializes as JSON string");

@@ -98,7 +98,7 @@ impl GraphClient {
     /// The `v1_vector_index` migration handles missing-embedding nodes gracefully
     /// (they're just not indexed for vector search until embedded).
     pub async fn upsert_symbol(&self, sym: &Symbol) -> Result<()> {
-        let kind = serde_json::to_value(&sym.kind).expect("SymbolKind serializes infallibly");
+        let kind = serde_json::to_value(sym.kind).expect("SymbolKind serializes infallibly");
         let kind_str = kind.as_str().expect("SymbolKind serializes as JSON string");
         let cypher = format!(
             r#"MERGE (s:Symbol {{qualified_name: '{qname}'}})

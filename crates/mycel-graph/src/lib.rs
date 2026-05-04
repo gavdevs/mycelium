@@ -2,8 +2,11 @@
 
 pub mod client;
 pub mod edge;
+pub mod manifest;
 pub mod migrations;
+pub mod queries;
 pub mod symbol;
+pub mod vector;
 
 pub(crate) mod cypher;
 
