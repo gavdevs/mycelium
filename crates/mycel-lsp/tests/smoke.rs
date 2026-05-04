@@ -1,7 +1,6 @@
 //! Requires multilspy installed and tsserver available. Set MYCEL_TEST_LSP=1 to run.
 
 use camino::Utf8PathBuf;
-use mycel_core::*;
 use mycel_lsp::*;
 
 #[tokio::test]
