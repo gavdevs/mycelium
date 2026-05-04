@@ -283,23 +283,6 @@ fn signature_first_line(n: Node, src: &str) -> Option<String> {
 /// method-shorthand (e.g. `const obj = { greet(name) {...} }`). Both are
 /// captured as SymbolKind::Method. LSP refinement may re-classify
 /// object-literal shorthands later.
-const SYMBOLS_QUERY: &str = r#"
-(export_statement (function_declaration name: (identifier) @fn.name) @fn.def) @exported
-(export_statement (class_declaration name: (type_identifier) @class.name) @class.def) @exported
-(export_statement (interface_declaration name: (type_identifier) @interface.name) @interface.def) @exported
-(export_statement (type_alias_declaration name: (type_identifier) @type.name) @type.def) @exported
-(function_declaration name: (identifier) @fn.name) @fn.def
-(method_definition name: (property_identifier) @method.name) @method.def
-(class_declaration name: (type_identifier) @class.name) @class.def
-(interface_declaration name: (type_identifier) @interface.name) @interface.def
-(type_alias_declaration name: (type_identifier) @type.name) @type.def
-"#;
-
-const CALLS_QUERY: &str = r#"
-(call_expression function: (identifier) @callee) @site
-(call_expression function: (member_expression property: (property_identifier) @callee)) @site
-"#;
-
-const IMPORTS_QUERY: &str = r#"
-(import_statement source: (string) @import.source)
-"#;
+const SYMBOLS_QUERY: &str = include_str!("typescript_queries/symbols.scm");
+const CALLS_QUERY: &str = include_str!("typescript_queries/calls.scm");
+const IMPORTS_QUERY: &str = include_str!("typescript_queries/imports.scm");

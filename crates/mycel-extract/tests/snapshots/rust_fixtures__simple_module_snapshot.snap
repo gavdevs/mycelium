@@ -1,0 +1,33 @@
+---
+source: crates/mycel-extract/tests/rust_fixtures.rs
+assertion_line: 21
+expression: "extract_fixture(\"simple_module.rs\")"
+---
+symbols:
+  - qualified_name: "tests/fixtures/rust/simple_module.rs::add"
+    kind: function
+    file_path: tests/fixtures/rust/simple_module.rs
+    start_line: 1
+    end_line: 3
+    signature: "pub fn add(a: u32, b: u32) -> u32 {"
+    exported: true
+  - qualified_name: "tests/fixtures/rust/simple_module.rs::double"
+    kind: function
+    file_path: tests/fixtures/rust/simple_module.rs
+    start_line: 5
+    end_line: 7
+    signature: "fn double(x: u32) -> u32 {"
+    exported: false
+  - qualified_name: "tests/fixtures/rust/simple_module.rs::ANSWER"
+    kind: constant
+    file_path: tests/fixtures/rust/simple_module.rs
+    start_line: 9
+    end_line: 9
+    signature: "pub const ANSWER: u32 = 42;"
+    exported: true
+edges:
+  - from: "tests/fixtures/rust/simple_module.rs::double"
+    to: add
+    kind: calls
+    source: tree_sitter
+language: rust

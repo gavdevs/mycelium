@@ -1,0 +1,9 @@
+(function_item name: (identifier) @fn.name) @fn.def
+(function_signature_item name: (identifier) @fn.name) @fn.def
+(struct_item   name: (type_identifier) @struct.name) @struct.def
+(enum_item     name: (type_identifier) @enum.name)   @enum.def
+(trait_item    name: (type_identifier) @trait.name)  @trait.def
+(type_item     name: (type_identifier) @type.name)   @type.def
+(const_item    name: (identifier) @const.name)       @const.def
+(static_item   name: (identifier) @static.name)      @static.def
+(mod_item      name: (identifier) @mod.name)         @mod.def
