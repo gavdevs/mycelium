@@ -956,6 +956,7 @@ dependencies = [
 name = "mycel-extract"
 version = "0.0.1"
 dependencies = [
+ "camino",
  "mycel-core",
  "streaming-iterator",
  "tracing",

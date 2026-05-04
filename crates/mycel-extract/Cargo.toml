@@ -13,4 +13,5 @@ tree-sitter-typescript = { workspace = true }
 tree-sitter-rust = { workspace = true }
 streaming-iterator = { workspace = true }
 mycel-core = { path = "../mycel-core" }
+camino = { workspace = true }
 tracing = { workspace = true }
