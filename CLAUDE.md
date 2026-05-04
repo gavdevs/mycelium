@@ -4,27 +4,30 @@ Mycelium is a local-first, graph-aware code intelligence layer for AI agents. We
 
 ## Use `mycel` instead of grep+Read for symbol/code lookup
 
-The daemon is registered as a systemd-user service (`mycel.service`) and watches this tree with a 2s debounce. Edits you make are reflected in the graph within seconds. Before reaching for `grep`/`rg`/`find`, try the corresponding `mycel` query — fewer tokens, structurally aware, gives you line ranges and signatures directly.
+The daemon is registered as a systemd-user service (`mycel.service`) and watches this tree with a 2s debounce. Edits you make are reflected in the graph within seconds.
 
-Run from the repo root:
+**As of 2026-05-04 benchmarking: only `definers` is reliable.** Use it for "where is X defined" — it returns a line range and signature in one shot, saving the subsequent `Read`. Fall back to grep for everything else.
 
-| Task | Command | Notes |
-|------|---------|-------|
-| Find a symbol by name | `mycel --repo . definers <name>` | Matches short name OR full qname; returns file/line/signature |
-| Semantic exploration | `mycel --repo . find '<natural-language query>'` | Vector search over signature embeddings |
-| Same-file callers/callees | `mycel --repo . callers <name>` / `callees <name>` | Cross-file is still broken (see below) |
-| Type usage | `mycel --repo . uses <type>` | |
-| Interface implementations | `mycel --repo . implements <iface>` | |
+Run from the repo root (`target/release/mycel`; not on PATH):
 
-Add `--json` for structured output. The release binary lives at `target/release/mycel`; if you've rebuilt the daemon you may also need `mycel daemon stop && mycel daemon start` to pick up the new binary.
+| Task | Command | Status |
+|------|---------|--------|
+| Find a symbol by name | `target/release/mycel --repo . definers <name>` | **Works** — returns file/line-range/signature |
+| Semantic exploration | `target/release/mycel --repo . find '<query>'` | **Unreliable** — signature-only embeddings cluster by name shape, not behavior; use grep instead |
+| Callers/callees | `target/release/mycel --repo . callers <name>` | **Broken** — returns empty; use grep |
+| Type usage | `target/release/mycel --repo . uses <type>` | **Broken** — returns empty; use grep |
+| Interface implementations | `target/release/mycel --repo . implements <iface>` | **Broken** — IMPLEMENTS edges not landing; use grep |
+
+Add `--json` for structured output. If you've rebuilt the daemon: `target/release/mycel daemon stop && target/release/mycel daemon start`.
 
 ## Phase 1 limitations to be aware of
 
 These are tracked and being worked on; flag them when they bite, don't try to fix in passing:
 
-- **`find` clusters by surface syntax, not behavior.** Embeddings are signature-only in v0; descriptions land in Phase 2. So "compute a content hash" may surface the `dedup` module before `content_hash` itself. When `find` is blunt, fall back to `definers` or grep — don't keep retrying.
-- **Cross-file CALLS edges drop silently.** Tree-sitter only resolves same-file callees; the multilspy bridge currently emits degenerate `REFERENCES` (file URIs as targets) so cross-file CALLS don't land. `mycel callers <name>` returns same-file callers only. Phase 2/3 territory — don't paper over this with fragile heuristics.
-- **`IMPORTS` queries usually return empty** because tree-sitter emits import edges as file→file or file→bare-path, not Symbol→Symbol. Use `grep -rn 'use <crate>'` or read the file directly until the schema gets reconciled.
+- **`find` clusters by name shape, not behavior.** Benchmarked: "compute content hash for deduplication" returned `Indexer`, `Reranker`, `launchd` — the actual `content_hash` function wasn't in the top 8. Descriptions land in Phase 2; until then, use grep when `find` misses.
+- **`callers`, `uses`, `implements` all return empty.** Benchmarked: `callers content_hash` → empty (grep found 3 callers). `uses Symbol` → empty (grep found 67). `implements Embedder` → empty (OllamaEmbedder clearly implements it). CALLS, TYPED_BY, and IMPLEMENTS edges are not landing. Phase 2/3 work.
+- **Cross-file CALLS edges drop silently.** Tree-sitter only resolves same-file callees; the multilspy bridge currently emits degenerate `REFERENCES` so cross-file CALLS don't land. Phase 2/3 territory.
+- **`IMPORTS` queries return empty** — tree-sitter emits import edges as file→file, not Symbol→Symbol. Use `grep -rn 'use <crate>'` directly.
 
 If a `mycel` command returns empty when you expect results, **first verify the daemon is healthy** before assuming the query is wrong:
 
