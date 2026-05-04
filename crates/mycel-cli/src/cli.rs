@@ -30,7 +30,13 @@ pub enum Cmd {
     Imports { file: String },
     Uses { ty: String },
     Implements { iface: String },
-    Find { query: String, #[arg(long, default_value_t = 8)] limit: usize },
+    /// `--limit` default is 20 because FalkorDB's HNSW vector index walks the
+    /// k-nearest graph adaptively and can return zero rows at very low k for
+    /// embeddings that don't have many close neighbors. Bumping the default
+    /// keeps single-call invocations honest on Phase 2 description embeddings,
+    /// where good matches sometimes sit slightly farther in cosine space than
+    /// signature embeddings did.
+    Find { query: String, #[arg(long, default_value_t = 20)] limit: usize },
     /// Run only the Phase 2 description-synthesis pass on an already-indexed
     /// graph. Idempotent — symbols with an existing description are skipped
     /// unless `--force` is set.
