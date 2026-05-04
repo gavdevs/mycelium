@@ -88,16 +88,74 @@ impl Embedder for OllamaEmbedder {
 }
 
 pub struct OllamaSynthesizer {
-    pub endpoint: String,
-    pub model: String,
+    endpoint: String,
+    model: String,
+    identity: String,
+    client: reqwest::Client,
 }
+
+impl OllamaSynthesizer {
+    pub fn new(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
+        let model = model.into();
+        let identity = format!("ollama/{model}");
+        Self {
+            endpoint: endpoint.into(),
+            model,
+            identity,
+            client: reqwest::Client::builder()
+                // Local-Ollama generation can take 10–30s per call on small
+                // models and far longer on the qwen3.6:35b-a3b max tier; the
+                // default 30s reqwest timeout would silently truncate them.
+                .timeout(std::time::Duration::from_secs(180))
+                .build()
+                .expect("reqwest client builds with default tls"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct GenerateResponse {
+    response: String,
+}
+
 #[async_trait]
 impl Synthesizer for OllamaSynthesizer {
     fn identity(&self) -> &str {
-        &self.model
+        &self.identity
     }
-    async fn synthesize(&self, _prompt: &str) -> Result<String> {
-        todo!("phase 2 — wire generate endpoint")
+    async fn synthesize(&self, prompt: &str) -> Result<String> {
+        let url = format!("{}/api/generate", self.endpoint);
+        // `stream:false` makes Ollama return one JSON object instead of a
+        // newline-delimited stream — we want the whole completion in one shot.
+        // Low temperature so descriptions are deterministic across re-runs.
+        let body = json!({
+            "model": self.model,
+            "prompt": prompt,
+            "stream": false,
+            "options": {"temperature": 0.2}
+        });
+        let resp: GenerateResponse = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| MycelError::Model {
+                provider: self.identity.clone(),
+                message: format!("send: {e}"),
+            })?
+            .error_for_status()
+            .map_err(|e| MycelError::Model {
+                provider: self.identity.clone(),
+                message: format!("status: {e}"),
+            })?
+            .json()
+            .await
+            .map_err(|e| MycelError::Model {
+                provider: self.identity.clone(),
+                message: format!("json: {e}"),
+            })?;
+        Ok(resp.response.trim().to_string())
     }
 }
 

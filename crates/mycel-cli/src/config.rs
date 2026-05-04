@@ -115,3 +115,66 @@ pub fn embedder_from_cfg(cfg: &Config) -> std::sync::Arc<dyn mycel_models::Embed
         }
     }
 }
+
+/// Build a Synthesizer from config, falling back to the tier-default Ollama
+/// model when the user hasn't pinned one. Returns None only if the user
+/// explicitly sets `MYCEL_SYNTHESIZER=off` (escape hatch for incremental
+/// indexing without LLM cost).
+pub fn synthesizer_from_cfg(cfg: &Config) -> Option<std::sync::Arc<dyn mycel_models::Synthesizer>> {
+    if std::env::var("MYCEL_SYNTHESIZER").as_deref() == Ok("off") {
+        return None;
+    }
+    let provider = cfg
+        .providers
+        .synthesizer
+        .clone()
+        .unwrap_or_else(ProviderConfig::default_ollama);
+    match provider {
+        ProviderConfig::Ollama { endpoint, model, .. } => {
+            let model = std::env::var("MYCEL_SYNTHESIZER_MODEL")
+                .ok()
+                .or(model)
+                .unwrap_or_else(|| default_synthesizer_model(cfg.models.tier));
+            Some(std::sync::Arc::new(mycel_models::OllamaSynthesizer::new(
+                endpoint, model,
+            )))
+        }
+    }
+}
+
+/// Pick the default synthesizer model for a tier, mirroring DESIGN.md's
+/// tier table. If `tier` is None, auto-detect from system memory.
+fn default_synthesizer_model(tier: Option<Tier>) -> String {
+    let tier = tier.unwrap_or_else(detect_tier);
+    match tier {
+        Tier::Minimal => "gemma4:e2b".into(),
+        Tier::Balanced => "gemma4:e4b".into(),
+        Tier::Max => "qwen3.6:35b-a3b".into(),
+    }
+}
+
+/// Memory-based tier detection mirroring scripts/bootstrap.sh:
+/// <12 GB → minimal, <24 GB → balanced, ≥24 GB → max. Falls back to
+/// `balanced` on platforms without a /proc/meminfo (macOS), which is the
+/// safest middle ground for systems with unknown memory.
+fn detect_tier() -> Tier {
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Some(kb) = rest.split_whitespace().next() {
+                    if let Ok(kb) = kb.parse::<u64>() {
+                        let gb = kb / 1024 / 1024;
+                        return if gb < 12 {
+                            Tier::Minimal
+                        } else if gb < 24 {
+                            Tier::Balanced
+                        } else {
+                            Tier::Max
+                        };
+                    }
+                }
+            }
+        }
+    }
+    Tier::Balanced
+}
