@@ -46,12 +46,17 @@ impl GraphClient {
         Ok(())
     }
 
-    pub async fn query_callers(&self, qualified: &str) -> Result<Vec<Symbol>> {
+    /// "Who calls this?" Matches the callee on either the full qualified name
+    /// (e.g., `tests/fixtures/typescript/simple_function.ts::add`) or the short
+    /// `name` property (e.g., `add`), so users don't have to type fully-qualified
+    /// names. Mirrors `query_definers`'s name-or-qname behavior.
+    pub async fn query_callers(&self, name_or_qname: &str) -> Result<Vec<Symbol>> {
         let cypher = format!(
-            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol {{qualified_name: '{q}'}}) \
-             RETURN a.qualified_name, a.kind, a.file_path, a.start_line, a.end_line, \
+            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) \
+             WHERE b.name = '{q}' OR b.qualified_name = '{q}' \
+             RETURN DISTINCT a.qualified_name, a.kind, a.file_path, a.start_line, a.end_line, \
                     a.signature, a.exported",
-            q = escape(qualified),
+            q = escape(name_or_qname),
         );
         Ok(self
             .query(&cypher)
@@ -61,12 +66,15 @@ impl GraphClient {
             .collect())
     }
 
-    pub async fn query_callees(&self, qualified: &str) -> Result<Vec<Symbol>> {
+    /// "What does this call?" Matches the caller on short `name` or full
+    /// qualified name. See `query_callers` for rationale.
+    pub async fn query_callees(&self, name_or_qname: &str) -> Result<Vec<Symbol>> {
         let cypher = format!(
-            "MATCH (a:Symbol {{qualified_name: '{q}'}})-[:CALLS]->(b:Symbol) \
-             RETURN b.qualified_name, b.kind, b.file_path, b.start_line, b.end_line, \
+            "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) \
+             WHERE a.name = '{q}' OR a.qualified_name = '{q}' \
+             RETURN DISTINCT b.qualified_name, b.kind, b.file_path, b.start_line, b.end_line, \
                     b.signature, b.exported",
-            q = escape(qualified),
+            q = escape(name_or_qname),
         );
         Ok(self
             .query(&cypher)

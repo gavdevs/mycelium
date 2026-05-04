@@ -59,6 +59,18 @@ impl GraphClient {
         Ok(())
     }
 
+    /// Drop the File node entirely. Callers must run `prune_stale_symbols(path, &[])`
+    /// first if they also want to wipe symbols owned by the file. Used when a
+    /// file is deleted on disk.
+    pub async fn delete_file_record(&self, path: &Utf8Path) -> Result<()> {
+        let cypher = format!(
+            "MATCH (f:File {{path: '{p}'}}) DETACH DELETE f",
+            p = escape(path.as_str())
+        );
+        self.query(&cypher).await?;
+        Ok(())
+    }
+
     /// Sets the embedding vector property on a Symbol node.
     pub async fn set_symbol_embedding(&self, qualified_name: &str, vec: &[f32]) -> Result<()> {
         let vec_lit = vec

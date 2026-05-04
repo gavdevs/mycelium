@@ -38,7 +38,11 @@ impl Indexer {
             debug!(file=%path, "no extractor for extension");
             return Ok(None);
         };
-        let extraction = extractor.extract(path, content)?;
+        let mut extraction = extractor.extract(path, content)?;
+        // Tree-sitter has no symbol table; same-file calls come out with bare
+        // callee names. Resolve them to full qnames so edges actually land at
+        // upsert time. (Cross-file resolution is LSP territory.)
+        mycel_extract::resolve_same_file_edges(path, &mut extraction.edges, &extraction.symbols);
         info!(
             file=%path,
             n_symbols = extraction.symbols.len(),
@@ -50,7 +54,8 @@ impl Indexer {
         let mut all_edges = extraction.edges.clone();
         if let Some(lsp) = &self.lsp {
             match lsp.refine(path, extractor.language_name(), &extraction).await {
-                Ok(lsp_edges) => {
+                Ok(mut lsp_edges) => {
+                    mycel_extract::resolve_same_file_edges(path, &mut lsp_edges, &extraction.symbols);
                     debug!(file=%path, n_lsp_edges = lsp_edges.len(), "lsp refined");
                     all_edges.extend(lsp_edges);
                 }
@@ -59,6 +64,22 @@ impl Indexer {
         }
 
         // 4a. Graph upsert — SYMBOLS ONLY. Edges deferred to caller.
+        //     Prune symbols that were owned by this file in a prior index pass
+        //     but are no longer present in the new extraction (function deleted,
+        //     renamed, or file shrunk). Without this, ghost symbols accumulate
+        //     and surface in `definers`/`find` queries forever.
+        let kept_qnames: Vec<&str> = extraction
+            .symbols
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .collect();
+        let pruned = self
+            .graph
+            .prune_stale_symbols(path.as_str(), &kept_qnames)
+            .await?;
+        if pruned > 0 {
+            debug!(file=%path, pruned, "pruned stale symbols");
+        }
         self.graph.upsert_symbol_batch(&extraction.symbols).await?;
 
         // 5. Embed signatures (Phase 1: signature-only).
@@ -106,6 +127,19 @@ impl Indexer {
     pub async fn index_file(&self, path: &Utf8Path, content: &str) -> Result<()> {
         if let Some(edges) = self.index_file_collect_edges(path, content).await? {
             self.graph.upsert_edge_batch(&edges).await?;
+        }
+        Ok(())
+    }
+
+    /// Wipe every Symbol owned by `path` and the File node itself. Used by the
+    /// daemon when a watcher event indicates the file no longer exists on disk.
+    /// Without this, deleting a source file leaves all its symbols and edges as
+    /// ghosts in the graph.
+    pub async fn forget_file(&self, path: &Utf8Path) -> Result<()> {
+        let pruned = self.graph.prune_stale_symbols(path.as_str(), &[]).await?;
+        self.graph.delete_file_record(path).await?;
+        if pruned > 0 {
+            info!(file=%path, pruned, "removed deleted file from graph");
         }
         Ok(())
     }

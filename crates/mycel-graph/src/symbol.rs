@@ -132,6 +132,42 @@ impl GraphClient {
         Ok(())
     }
 
+    /// Detach-delete all Symbol nodes owned by `file_path` whose qualified
+    /// names are NOT in `keep`. Used by the indexer to prune symbols that
+    /// were removed from a file between reindex passes — without this,
+    /// deleting a function from a file leaves a ghost Symbol in the graph
+    /// that still answers `definers`/`find` queries.
+    ///
+    /// `DETACH DELETE` cascades through relationships, so any incoming or
+    /// outgoing edges are also removed. Cross-file edges to the deleted
+    /// symbol disappear correctly because the symbol no longer exists.
+    pub async fn prune_stale_symbols(&self, file_path: &str, keep: &[&str]) -> Result<usize> {
+        // Build the IN-list of qnames to keep. Empty list means "delete all
+        // symbols for this file" — valid when a file becomes empty/non-source.
+        let kept = if keep.is_empty() {
+            "[]".to_string()
+        } else {
+            let parts: Vec<String> = keep.iter().map(|q| format!("'{}'", escape(q))).collect();
+            format!("[{}]", parts.join(", "))
+        };
+        let cypher = format!(
+            "MATCH (s:Symbol) WHERE s.file_path = '{p}' AND NOT s.qualified_name IN {kept} \
+             DETACH DELETE s RETURN count(s) AS deleted",
+            p = escape(file_path),
+        );
+        let rows = self.query(&cypher).await?;
+        let deleted = rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::I64(n) => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        Ok(deleted)
+    }
+
     pub async fn query_definers(&self, name: &str) -> Result<Vec<Symbol>> {
         let cypher = format!(
             "MATCH (s:Symbol) WHERE s.name = '{name}' OR s.qualified_name = '{name}' \
