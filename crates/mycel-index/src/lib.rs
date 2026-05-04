@@ -1,3 +1,10 @@
-//! mycel-index
+//! mycel-index — Phase 1 indexing pipeline.
 //!
-//! Phase 1 stub — populated by subsequent tasks.
+//! Orchestrates: extractor (tree-sitter) → LSP refinement (multilspy) →
+//! graph upsert (mycel-graph) → embed signatures (mycel-models) → File
+//! record write. Content-hash dedup short-circuits unchanged files.
+
+pub mod dedup;
+pub mod pipeline;
+
+pub use pipeline::Indexer;

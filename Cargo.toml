@@ -53,6 +53,7 @@ clap = { version = "4", features = ["derive"] }
 # misc
 blake3 = "1"
 time = { version = "0.3", features = ["serde", "serde-well-known", "formatting"] }
+walkdir = "2"
 # test
 insta = { version = "1", features = ["json", "yaml"] }
 proptest = "1"

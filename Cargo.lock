@@ -1024,6 +1024,7 @@ dependencies = [
 name = "mycel-graph"
 version = "0.0.1"
 dependencies = [
+ "camino",
  "falkordb",
  "mycel-core",
  "serde_json",
@@ -1043,8 +1044,10 @@ dependencies = [
  "mycel-graph",
  "mycel-lsp",
  "mycel-models",
+ "time",
  "tokio",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

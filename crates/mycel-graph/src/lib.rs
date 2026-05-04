@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod edge;
+pub mod file;
 pub mod manifest;
 pub mod migrations;
 pub mod queries;
