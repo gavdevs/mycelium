@@ -1,0 +1,27 @@
+---
+source: crates/mycel-extract/tests/typescript_fixtures.rs
+assertion_line: 31
+expression: "extract_fixture(\"imports_and_exports.ts\")"
+---
+symbols:
+  - qualified_name: "tests/fixtures/typescript/imports_and_exports.ts::greet"
+    kind: method
+    file_path: tests/fixtures/typescript/imports_and_exports.ts
+    start_line: 5
+    end_line: 7
+    signature: "greet(name: string): string {"
+    exported: false
+edges:
+  - from: "tests/fixtures/typescript/imports_and_exports.ts::greet"
+    to: add
+    kind: calls
+    source: tree_sitter
+  - from: tests/fixtures/typescript/imports_and_exports.ts
+    to: "./simple_function"
+    kind: imports
+    source: tree_sitter
+  - from: tests/fixtures/typescript/imports_and_exports.ts
+    to: "./class_with_methods"
+    kind: imports
+    source: tree_sitter
+language: typescript

@@ -15,3 +15,7 @@ streaming-iterator = { workspace = true }
 mycel-core = { path = "../mycel-core" }
 camino = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }

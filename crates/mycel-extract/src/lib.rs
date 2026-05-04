@@ -3,10 +3,11 @@
 
 use camino::Utf8Path;
 use mycel_core::*;
+use serde::{Deserialize, Serialize};
 
 pub mod languages;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractionOutput {
     pub symbols: Vec<Symbol>,
     pub edges: Vec<Edge>,
