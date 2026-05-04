@@ -13,3 +13,8 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 mycel-core = { path = "../mycel-core" }
+mycel-extract = { path = "../mycel-extract" }
+camino = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

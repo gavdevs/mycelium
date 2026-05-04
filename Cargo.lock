@@ -1040,7 +1040,9 @@ dependencies = [
 name = "mycel-lsp"
 version = "0.0.1"
 dependencies = [
+ "camino",
  "mycel-core",
+ "mycel-extract",
  "serde",
  "serde_json",
  "tokio",
