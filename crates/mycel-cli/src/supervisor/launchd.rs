@@ -30,17 +30,21 @@ fn mise_shims_path() -> Result<String> {
         .into_owned())
 }
 
-pub fn install() -> Result<()> {
+pub fn install(repo: &camino::Utf8Path) -> Result<()> {
+    let canon = repo
+        .canonicalize_utf8()
+        .with_context(|| format!("repo {repo} does not exist"))?;
     let plist = TEMPLATE
         .replace("__BINARY_PATH__", &binary_path()?)
         .replace("__LOG_PATH__", &log_path()?.to_string_lossy())
-        .replace("__MISE_SHIMS__", &mise_shims_path()?);
+        .replace("__MISE_SHIMS__", &mise_shims_path()?)
+        .replace("__REPO__", canon.as_str());
     std::fs::write(plist_path()?, plist)?;
     let status = Command::new("launchctl")
         .args(["load", plist_path()?.to_str().unwrap()])
         .status()?;
     anyhow::ensure!(status.success(), "launchctl load failed");
-    println!("installed and loaded");
+    println!("installed and loaded for repo: {canon}");
     Ok(())
 }
 

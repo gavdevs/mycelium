@@ -29,7 +29,9 @@ pub enum Cmd {
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    Install,
+    /// Register the daemon with the platform supervisor for a repo.
+    /// Defaults to the current working directory if no repo is given.
+    Install { repo: Option<Utf8PathBuf> },
     Uninstall,
     Start,
     Stop,

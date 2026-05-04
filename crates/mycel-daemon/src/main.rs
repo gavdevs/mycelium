@@ -1,11 +1,13 @@
 mod watcher;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
+use mycel_core::LspConfig;
 use mycel_graph::GraphClient;
 use mycel_index::Indexer;
 use mycel_lsp::MultilspyResolver;
 use mycel_models::OllamaEmbedder;
+use serde::Deserialize;
 use std::sync::Arc;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -26,9 +28,19 @@ async fn main() -> Result<()> {
         .init();
     info!("daemon starting");
 
-    let repo_str = std::env::var("MYCEL_REPO").unwrap_or_else(|_| ".".into());
+    // Phase 1 single-repo daemon: require an explicit repo via MYCEL_REPO. The
+    // previous "." default was a footgun under systemd-user, where CWD is $HOME
+    // — the daemon would happily start indexing the user's entire home dir.
+    let repo_str = std::env::var("MYCEL_REPO").map_err(|_| {
+        anyhow::anyhow!(
+            "MYCEL_REPO not set. The daemon requires an explicit repo path; set the env var \
+             or reinstall via `mycel daemon install <repo>`."
+        )
+    })?;
     let repo: Utf8PathBuf = repo_str.into();
-    let repo_canon = repo.canonicalize_utf8()?;
+    let repo_canon = repo.canonicalize_utf8()
+        .with_context(|| format!("MYCEL_REPO={repo} does not exist or is not a directory"))?;
+    info!(repo=%repo_canon, "indexing repo");
 
     let url = std::env::var("MYCEL_FALKORDB_URL")
         .unwrap_or_else(|_| "redis://localhost:6379".into());
@@ -36,11 +48,16 @@ async fn main() -> Result<()> {
     let graph = GraphClient::connect(&url, &graph_name).await?;
     let embedder: Arc<dyn mycel_models::Embedder> =
         Arc::new(OllamaEmbedder::new("http://localhost:11434", "embeddinggemma"));
-    let bridge_cmd = format!("python3 {repo_canon}/scripts/multilspy_bridge.py");
+
+    let bridge_cmd = resolve_bridge_cmd(&repo_canon)?;
+    info!(bridge_cmd=%bridge_cmd, "spawning multilspy bridge");
     let lsp = MultilspyResolver::spawn(&bridge_cmd, repo_canon.clone())
         .await
         .ok()
         .map(Arc::new);
+    if lsp.is_none() {
+        warn!("multilspy bridge unavailable; proceeding with tree-sitter only");
+    }
     let indexer = Indexer { graph, lsp, embedder };
 
     info!("starting initial index");
@@ -58,10 +75,44 @@ async fn main() -> Result<()> {
                     warn!(file=%path, error=%e, "index_file failed");
                 }
             }
-            Err(_) => { /* file deleted between event and read; skip */ }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(e) = indexer.forget_file(&path).await {
+                    warn!(file=%path, error=%e, "forget_file failed");
+                }
+            }
+            Err(e) => {
+                warn!(file=%path, error=%e, "read failed");
+            }
         }
     }
     Ok(())
+}
+
+/// Resolve the multilspy bridge command in this priority order:
+/// 1. `MYCEL_LSP_BRIDGE_CMD` env var (highest — what the supervisor template sets).
+/// 2. `~/.config/mycel/config.toml` `[lsp] multilspy_path`.
+/// 3. `<repo>/scripts/multilspy_bridge.py` invoked via bare `python3` (Phase 1 default).
+fn resolve_bridge_cmd(repo_canon: &camino::Utf8Path) -> Result<String> {
+    if let Ok(v) = std::env::var("MYCEL_LSP_BRIDGE_CMD") {
+        if !v.trim().is_empty() {
+            return Ok(v);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let cfg = home.join(".config/mycel/config.toml");
+        if cfg.exists() {
+            let s = std::fs::read_to_string(&cfg)
+                .with_context(|| format!("read {}", cfg.display()))?;
+            #[derive(Deserialize)]
+            struct Layer { lsp: Option<LspConfig> }
+            let parsed: Layer = toml::from_str(&s)
+                .with_context(|| format!("parse {}", cfg.display()))?;
+            if let Some(lsp) = parsed.lsp {
+                return Ok(lsp.multilspy_path);
+            }
+        }
+    }
+    Ok(format!("python3 {repo_canon}/scripts/multilspy_bridge.py"))
 }
 
 /// Stable repo id derived from the canonical path. MUST match the CLI's

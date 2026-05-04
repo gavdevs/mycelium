@@ -1,5 +1,6 @@
 use crate::cli::DaemonAction;
 use anyhow::Result;
+use camino::Utf8PathBuf;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -10,7 +11,17 @@ mod systemd;
 
 pub async fn dispatch(action: DaemonAction) -> Result<()> {
     match action {
-        DaemonAction::Install => platform_install(),
+        DaemonAction::Install { repo } => {
+            let repo = match repo {
+                Some(p) => p,
+                None => {
+                    let cwd = std::env::current_dir()?;
+                    Utf8PathBuf::from_path_buf(cwd)
+                        .map_err(|_| anyhow::anyhow!("non-utf8 cwd"))?
+                }
+            };
+            platform_install(&repo)
+        }
         DaemonAction::Uninstall => platform_uninstall(),
         DaemonAction::Start => platform_start(),
         DaemonAction::Stop => platform_stop(),
@@ -21,15 +32,15 @@ pub async fn dispatch(action: DaemonAction) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform_install() -> Result<()> {
-    launchd::install()
+fn platform_install(repo: &camino::Utf8Path) -> Result<()> {
+    launchd::install(repo)
 }
 #[cfg(target_os = "linux")]
-fn platform_install() -> Result<()> {
-    systemd::install()
+fn platform_install(repo: &camino::Utf8Path) -> Result<()> {
+    systemd::install(repo)
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn platform_install() -> Result<()> {
+fn platform_install(_repo: &camino::Utf8Path) -> Result<()> {
     anyhow::bail!("supervisor unsupported on this platform — use `mycel daemon run`")
 }
 

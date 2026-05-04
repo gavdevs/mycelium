@@ -34,11 +34,15 @@ fn mise_shims_path() -> Result<String> {
         .into_owned())
 }
 
-pub fn install() -> Result<()> {
+pub fn install(repo: &camino::Utf8Path) -> Result<()> {
+    let canon = repo
+        .canonicalize_utf8()
+        .with_context(|| format!("repo {repo} does not exist"))?;
     let unit = TEMPLATE
         .replace("__BINARY_PATH__", &binary_path()?)
         .replace("__LOG_PATH__", &log_path()?.to_string_lossy())
-        .replace("__MISE_SHIMS__", &mise_shims_path()?);
+        .replace("__MISE_SHIMS__", &mise_shims_path()?)
+        .replace("__REPO__", canon.as_str());
     std::fs::write(unit_path()?, unit)?;
     Command::new("systemctl")
         .args(["--user", "daemon-reload"])
@@ -46,7 +50,7 @@ pub fn install() -> Result<()> {
     Command::new("systemctl")
         .args(["--user", "enable", "--now", "mycel.service"])
         .status()?;
-    println!("installed and started");
+    println!("installed and started for repo: {canon}");
     Ok(())
 }
 
