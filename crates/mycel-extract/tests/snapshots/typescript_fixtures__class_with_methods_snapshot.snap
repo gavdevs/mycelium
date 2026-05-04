@@ -1,0 +1,29 @@
+---
+source: crates/mycel-extract/tests/typescript_fixtures.rs
+assertion_line: 26
+expression: "extract_fixture(\"class_with_methods.ts\")"
+---
+symbols:
+  - qualified_name: "tests/fixtures/typescript/class_with_methods.ts::Greeter"
+    kind: interface
+    file_path: tests/fixtures/typescript/class_with_methods.ts
+    start_line: 1
+    end_line: 3
+    signature: "interface Greeter {"
+    exported: true
+  - qualified_name: "tests/fixtures/typescript/class_with_methods.ts::FormalGreeter"
+    kind: class
+    file_path: tests/fixtures/typescript/class_with_methods.ts
+    start_line: 5
+    end_line: 10
+    signature: "class FormalGreeter implements Greeter {"
+    exported: true
+  - qualified_name: "tests/fixtures/typescript/class_with_methods.ts::greet"
+    kind: method
+    file_path: tests/fixtures/typescript/class_with_methods.ts
+    start_line: 7
+    end_line: 9
+    signature: "greet(name: string): string {"
+    exported: false
+edges: []
+language: typescript

@@ -1,0 +1,31 @@
+[package]
+name = "mycel-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mycel-daemon"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+notify = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+mycel-index = { path = "../mycel-index" }
+mycel-graph = { path = "../mycel-graph" }
+mycel-extract = { path = "../mycel-extract" }
+mycel-lsp = { path = "../mycel-lsp" }
+mycel-models = { path = "../mycel-models" }
+mycel-core = { path = "../mycel-core" }
+anyhow = { workspace = true }
+camino = { workspace = true }
+dirs = "5"
+blake3 = { workspace = true }

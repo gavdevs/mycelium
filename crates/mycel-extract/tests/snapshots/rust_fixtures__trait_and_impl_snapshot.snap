@@ -1,0 +1,40 @@
+---
+source: crates/mycel-extract/tests/rust_fixtures.rs
+assertion_line: 26
+expression: "extract_fixture(\"trait_and_impl.rs\")"
+---
+symbols:
+  - qualified_name: "tests/fixtures/rust/trait_and_impl.rs::Greeter"
+    kind: trait
+    file_path: tests/fixtures/rust/trait_and_impl.rs
+    start_line: 1
+    end_line: 3
+    signature: "pub trait Greeter {"
+    exported: true
+  - qualified_name: "tests/fixtures/rust/trait_and_impl.rs::greet"
+    kind: function
+    file_path: tests/fixtures/rust/trait_and_impl.rs
+    start_line: 2
+    end_line: 2
+    signature: "fn greet(&self, name: &str) -> String;"
+    exported: false
+  - qualified_name: "tests/fixtures/rust/trait_and_impl.rs::FormalGreeter"
+    kind: struct
+    file_path: tests/fixtures/rust/trait_and_impl.rs
+    start_line: 5
+    end_line: 7
+    signature: "pub struct FormalGreeter {"
+    exported: true
+  - qualified_name: "tests/fixtures/rust/trait_and_impl.rs::greet"
+    kind: function
+    file_path: tests/fixtures/rust/trait_and_impl.rs
+    start_line: 10
+    end_line: 12
+    signature: "fn greet(&self, name: &str) -> String {"
+    exported: false
+edges:
+  - from: "tests/fixtures/rust/trait_and_impl.rs::FormalGreeter"
+    to: Greeter
+    kind: implements
+    source: tree_sitter
+language: rust

@@ -1,0 +1,26 @@
+---
+source: crates/mycel-extract/tests/typescript_fixtures.rs
+assertion_line: 21
+expression: "extract_fixture(\"simple_function.ts\")"
+---
+symbols:
+  - qualified_name: "tests/fixtures/typescript/simple_function.ts::add"
+    kind: function
+    file_path: tests/fixtures/typescript/simple_function.ts
+    start_line: 1
+    end_line: 3
+    signature: "function add(a: number, b: number): number {"
+    exported: true
+  - qualified_name: "tests/fixtures/typescript/simple_function.ts::double"
+    kind: function
+    file_path: tests/fixtures/typescript/simple_function.ts
+    start_line: 5
+    end_line: 7
+    signature: "function double(x: number): number {"
+    exported: false
+edges:
+  - from: "tests/fixtures/typescript/simple_function.ts::double"
+    to: add
+    kind: calls
+    source: tree_sitter
+language: typescript

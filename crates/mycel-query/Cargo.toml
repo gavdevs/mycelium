@@ -1,0 +1,15 @@
+[package]
+name = "mycel-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mycel-graph = { path = "../mycel-graph" }
+mycel-models = { path = "../mycel-models" }
+mycel-core = { path = "../mycel-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }

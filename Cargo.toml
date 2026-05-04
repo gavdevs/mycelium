@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mycel-core",
+    "crates/mycel-graph",
+    "crates/mycel-extract",
+    "crates/mycel-lsp",
+    "crates/mycel-models",
+    "crates/mycel-index",
+    "crates/mycel-query",
+    "crates/mycel-cli",
+    "crates/mycel-daemon",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["Gav <gavdevs@users.noreply.github.com>"]
+repository = "https://github.com/gavdevs/mycelium"
+rust-version = "1.88"
+
+[workspace.dependencies]
+# async
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+# error / log
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+# serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+# fs / paths
+camino = { version = "1", features = ["serde1"] }
+notify = { version = "=8.2", features = ["macos_fsevent"] }
+# storage
+falkordb = { version = "0.2", features = ["tokio", "tracing"] }
+# parsing
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.24"
+streaming-iterator = "0.1"
+# http
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# cli
+clap = { version = "4", features = ["derive"] }
+# misc
+blake3 = "1"
+time = { version = "0.3", features = ["serde", "serde-well-known", "formatting"] }
+walkdir = "2"
+# test
+insta = { version = "1", features = ["json", "yaml"] }
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

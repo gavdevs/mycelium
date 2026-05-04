@@ -1,0 +1,21 @@
+[package]
+name = "mycel-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mycel-graph = { path = "../mycel-graph" }
+mycel-extract = { path = "../mycel-extract" }
+mycel-lsp = { path = "../mycel-lsp" }
+mycel-models = { path = "../mycel-models" }
+mycel-core = { path = "../mycel-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+camino = { workspace = true }
+walkdir = { workspace = true }
+time = { workspace = true }
