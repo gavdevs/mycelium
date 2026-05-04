@@ -32,8 +32,15 @@ async fn main() -> anyhow::Result<()> {
             // cases). First-run is slower as a result; that's acceptable for
             // the v0 dogfood loop.
             let canon: Utf8PathBuf = path.canonicalize_utf8().unwrap_or(path.clone());
+            let bridge_cmd = if cfg.lsp.multilspy_path == mycel_core::LspConfig::default().multilspy_path {
+                // Default-path users get an auto-resolved absolute path so this works
+                // regardless of CWD. Custom multilspy_path values are passed through verbatim.
+                format!("python3 {canon}/scripts/multilspy_bridge.py")
+            } else {
+                cfg.lsp.multilspy_path.clone()
+            };
             let lsp = match mycel_lsp::MultilspyResolver::spawn(
-                &cfg.lsp.multilspy_path, canon.clone()
+                &bridge_cmd, canon.clone()
             ).await {
                 Ok(r) => Some(Arc::new(r)),
                 Err(e) => {

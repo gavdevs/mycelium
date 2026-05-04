@@ -27,3 +27,5 @@ mycel-models = { path = "../mycel-models" }
 mycel-core = { path = "../mycel-core" }
 anyhow = { workspace = true }
 camino = { workspace = true }
+dirs = "5"
+blake3 = { workspace = true }

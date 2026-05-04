@@ -989,7 +989,9 @@ name = "mycel-daemon"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "blake3",
  "camino",
+ "dirs",
  "futures",
  "mycel-core",
  "mycel-extract",
