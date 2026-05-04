@@ -6,3 +6,4 @@
 .mycel/
 *.log
 .worktrees/
+.claude/
