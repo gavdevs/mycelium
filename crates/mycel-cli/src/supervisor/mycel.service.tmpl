@@ -1,0 +1,15 @@
+[Unit]
+Description=Mycelium code intelligence daemon
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=__BINARY_PATH__ run
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:__LOG_PATH__
+StandardError=append:__LOG_PATH__
+Environment=PATH=__MISE_SHIMS__:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
