@@ -19,3 +19,4 @@ blake3 = { workspace = true }
 camino = { workspace = true }
 walkdir = { workspace = true }
 time = { workspace = true }
+futures = { workspace = true }

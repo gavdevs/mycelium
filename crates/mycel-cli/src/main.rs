@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Index { path } => {
+        Cmd::Index { path, no_descriptions } => {
             let graph_name = format!("mycel:{}", repo_id_from_path(&path));
             let g = GraphClient::connect(&cfg.storage.falkordb_url, &graph_name).await?;
             let embedder = config::embedder_from_cfg(&cfg);
@@ -48,9 +48,32 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             };
-            let indexer = Indexer { graph: g, lsp, embedder };
+            let synthesizer = if no_descriptions {
+                None
+            } else {
+                config::synthesizer_from_cfg(&cfg)
+            };
+            let indexer = Indexer { graph: g, lsp, embedder, synthesizer };
             let n = indexer.index_repo(&path).await?;
             println!("indexed {n} files");
+        }
+        Cmd::Synthesize { force, limit } => {
+            let g = open(&cfg, &cli.repo).await?;
+            let embedder = config::embedder_from_cfg(&cfg);
+            let Some(synthesizer) = config::synthesizer_from_cfg(&cfg) else {
+                eprintln!("MYCEL_SYNTHESIZER=off — refusing to run. Unset the env var or remove [providers.synthesizer] from config to enable.");
+                std::process::exit(2);
+            };
+            let outcome = mycel_index::synthesize_descriptions(
+                &g,
+                synthesizer,
+                embedder,
+                mycel_index::SynthesisOptions { force, limit, ..Default::default() },
+            ).await?;
+            println!(
+                "synthesized {} of {} (skipped {}, failed {})",
+                outcome.synthesized, outcome.considered, outcome.skipped, outcome.failed
+            );
         }
         Cmd::Callers { symbol } => {
             let g = open(&cfg, &cli.repo).await?;

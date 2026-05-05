@@ -31,4 +31,4 @@ pub trait Reranker: Send + Sync {
 }
 
 pub mod ollama;
-pub use ollama::OllamaEmbedder;
+pub use ollama::{OllamaEmbedder, OllamaSynthesizer};
