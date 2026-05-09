@@ -562,7 +562,6 @@ async fn cold_index_writes_embedding_and_body_hash() {
         graph: client.clone(),
         lsp: None,
         embedder: std::sync::Arc::new(StubEmbedder),
-        synthesizer: None,
     };
 
     let dir = tempfile::tempdir().unwrap();

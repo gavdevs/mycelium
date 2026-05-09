@@ -48,12 +48,8 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             };
-            let synthesizer = if no_descriptions {
-                None
-            } else {
-                config::synthesizer_from_cfg(&cfg)
-            };
-            let indexer = Indexer { graph: g, lsp, embedder, synthesizer };
+            let _ = no_descriptions; // flag kept for transition; removed in a later task
+            let indexer = Indexer { graph: g, lsp, embedder };
             let n = indexer.index_repo(&path).await?;
             println!("indexed {n} files");
         }
