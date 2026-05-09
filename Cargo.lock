@@ -1028,10 +1028,14 @@ dependencies = [
 name = "mycel-graph"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "camino",
  "falkordb",
  "mycel-core",
+ "mycel-index",
+ "mycel-models",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "tracing",
