@@ -66,7 +66,16 @@ pub enum Cmd {
         #[arg(long)]
         description: String,
     },
+    /// Manage Claude Code skills shipped with Mycelium.
+    Skill { #[command(subcommand)] action: SkillAction },
     Daemon { #[command(subcommand)] action: DaemonAction },
+}
+
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// Symlink <repo>/skills/mycel-graph-care into ~/.claude/skills/.
+    /// Idempotent. Run from a Mycelium repo checkout.
+    Install,
 }
 
 #[derive(Subcommand)]

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod output;
+mod skill_install;
 mod supervisor;
 
 use anyhow::Context;
@@ -165,6 +166,15 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Cmd::Skill { action } => match action {
+            cli::SkillAction::Install => {
+                let repo = cli.repo.clone().unwrap_or_else(|| ".".into());
+                let source = skill_install::source_for_repo(&repo);
+                let target = skill_install::default_target()?;
+                let outcome = skill_install::install(&source, &target)?;
+                println!("installed: {} -> {}", outcome.target, outcome.source);
+            }
+        },
         Cmd::Daemon { action } => supervisor::dispatch(action).await?,
     }
     Ok(())
