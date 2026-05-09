@@ -329,9 +329,17 @@ impl GraphClient {
             .map(|f| f.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // Atomic write: description, embedding, AND description_source_hash
+        // (mirrored from the Symbol's current body_hash) all land in a single
+        // statement so a stale hash can never be observed against a fresh
+        // description. Legacy Symbols whose body_hash hasn't been backfilled
+        // get NULL source_hash, which the daemon's staleness pass treats as
+        // "do not invalidate."
         let cypher = format!(
             "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
-             SET s.synthesized_description = '{d}', s.embedding = vecf32([{v}])",
+             SET s.synthesized_description = '{d}', \
+                 s.embedding = vecf32([{v}]), \
+                 s.description_source_hash = s.body_hash",
             q = escape(qname),
             d = escape(description),
             v = vec_lit,

@@ -220,3 +220,49 @@ async fn upsert_symbol_writes_body_hash_when_set() {
         other => panic!("expected String, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn set_description_stamps_source_hash_from_body_hash() {
+    let client = GraphClient::connect(&url(), "mycel:test:source_hash").await.unwrap();
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::stamp"),
+        kind: SymbolKind::Function,
+        file_path: "src/lib.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn stamp()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("body-v1".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+
+    let dummy_vec = vec![0.1f32; 768];
+    client
+        .set_symbol_description_and_embedding("crate::stamp", "Stamps a thing.", &dummy_vec)
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(
+            "MATCH (s:Symbol {qualified_name: 'crate::stamp'}) \
+             RETURN s.synthesized_description, s.description_source_hash",
+        )
+        .await
+        .unwrap();
+    let row = &rows[0];
+    match &row[0] {
+        falkordb::FalkorValue::String(s) => assert_eq!(s, "Stamps a thing."),
+        other => panic!("desc: {other:?}"),
+    }
+    match &row[1] {
+        falkordb::FalkorValue::String(s) => assert_eq!(
+            s, "body-v1",
+            "description_source_hash must mirror body_hash at write time"
+        ),
+        other => panic!("source_hash: {other:?}"),
+    }
+}
