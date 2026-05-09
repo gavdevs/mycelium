@@ -107,6 +107,27 @@ async fn main() -> anyhow::Result<()> {
             let r = mycel_query::find(&g, embedder.as_ref(), &query, limit).await?;
             output::print_find(&r, json);
         }
+        Cmd::Describe { qname } => {
+            let g = open(&cfg, &cli.repo).await?;
+            let info = g
+                .get_symbol_description(&qname)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no Symbol with qualified_name '{qname}'"))?;
+            if json {
+                let payload = serde_json::json!({
+                    "qualified_name": qname,
+                    "description": info.description,
+                    "body_hash": info.body_hash,
+                    "description_source_hash": info.description_source_hash,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                match info.description {
+                    Some(d) => println!("{d}"),
+                    None => println!("(none)"),
+                }
+            }
+        }
         Cmd::Daemon { action } => supervisor::dispatch(action).await?,
     }
     Ok(())
@@ -123,9 +144,17 @@ fn repo_id_from_path(path: &camino::Utf8Path) -> String {
 }
 
 async fn open(cfg: &config::Config, repo: &Option<Utf8PathBuf>) -> anyhow::Result<GraphClient> {
-    let graph_name = format!("mycel:{}", repo.as_deref()
-        .map(repo_id_from_path)
-        .unwrap_or_else(|| "default".into()));
+    // MYCEL_TEST_GRAPH overrides the derived graph name. Test-only — production
+    // callers leave it unset; cli_integration tests use it to target deterministic
+    // graph names for setup + assertion.
+    let graph_name = std::env::var("MYCEL_TEST_GRAPH").unwrap_or_else(|_| {
+        format!(
+            "mycel:{}",
+            repo.as_deref()
+                .map(repo_id_from_path)
+                .unwrap_or_else(|| "default".into())
+        )
+    });
     GraphClient::connect(&cfg.storage.falkordb_url, &graph_name).await
         .context("connect to FalkorDB")
 }

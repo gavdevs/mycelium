@@ -46,6 +46,9 @@ pub enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Print the current synthesized description for a Symbol, or "(none)".
+    /// With --json, emits {qualified_name, description, body_hash, description_source_hash}.
+    Describe { qname: String },
     Daemon { #[command(subcommand)] action: DaemonAction },
 }
 
