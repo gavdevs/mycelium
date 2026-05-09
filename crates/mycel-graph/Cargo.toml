@@ -18,3 +18,7 @@ mycel-core = { path = "../mycel-core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+async-trait = { workspace = true }
+mycel-models = { path = "../mycel-models" }
+mycel-index = { path = "../mycel-index" }

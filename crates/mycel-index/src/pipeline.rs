@@ -87,20 +87,32 @@ impl Indexer {
         }
         self.graph.upsert_symbol_batch(&extraction.symbols).await?;
 
-        // 5. Embed signatures (Phase 1: signature-only).
-        //
-        // CRITICAL: pair each symbol with its OWN embedding. The chunk-of-32
-        // batching means we must zip the symbol-chunk with the text-chunk,
-        // not zip `extraction.symbols.iter()` (which always restarts at 0)
-        // with the most recent batch's vectors.
+        // 5. Embed signature + body slice. Phase 2 (post-2026-05-05) cold
+        //    index no longer runs the Synthesizer; the embedding source is
+        //    the same string body_hash is computed over so embedding and
+        //    hash always move together.
         if !extraction.symbols.is_empty() {
-            let texts: Vec<&str> = extraction
+            use crate::body_slice::{FileCache, signature_plus_body_slice};
+            let mut cache = FileCache::new();
+            let prepared: Vec<(String, String)> = extraction
                 .symbols
                 .iter()
-                .map(|s| s.signature.as_str())
+                .map(|s| {
+                    let bs = signature_plus_body_slice(
+                        &mut cache,
+                        s.signature.as_str(),
+                        s.file_path.as_str(),
+                        s.start_line,
+                        s.end_line,
+                    );
+                    (bs.text, bs.hash)
+                })
                 .collect();
-            for (sym_chunk, text_chunk) in extraction.symbols.chunks(32).zip(texts.chunks(32)) {
-                let vecs = self.embedder.embed(text_chunk).await?;
+            for (sym_chunk, prep_chunk) in
+                extraction.symbols.chunks(32).zip(prepared.chunks(32))
+            {
+                let text_chunk: Vec<&str> = prep_chunk.iter().map(|(t, _)| t.as_str()).collect();
+                let vecs = self.embedder.embed(&text_chunk).await?;
                 if vecs.len() != sym_chunk.len() {
                     return Err(MycelError::Model {
                         provider: self.embedder.identity().into(),
@@ -111,9 +123,15 @@ impl Indexer {
                         ),
                     });
                 }
-                for (sym, vec) in sym_chunk.iter().zip(vecs.iter()) {
+                for ((sym, vec), (_, hash)) in
+                    sym_chunk.iter().zip(vecs.iter()).zip(prep_chunk.iter())
+                {
                     self.graph
-                        .set_symbol_embedding(sym.qualified_name.as_str(), vec)
+                        .set_symbol_embedding_and_body_hash(
+                            sym.qualified_name.as_str(),
+                            vec,
+                            hash.as_str(),
+                        )
                         .await?;
                 }
             }

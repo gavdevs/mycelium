@@ -538,3 +538,55 @@ async fn refresh_description_source_hashes_only_touches_legacy_rows() {
         "modern row untouched"
     );
 }
+
+#[tokio::test]
+async fn cold_index_writes_embedding_and_body_hash() {
+    let client = fresh_client("mycel:test:cold_index").await;
+
+    // Stub embedder so we don't depend on a running Ollama.
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl mycel_models::Embedder for StubEmbedder {
+        fn identity(&self) -> &str {
+            "stub/test"
+        }
+        fn dimension(&self) -> u32 {
+            768
+        }
+        async fn embed(&self, texts: &[&str]) -> mycel_core::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.42_f32; 768]).collect())
+        }
+    }
+
+    let indexer = mycel_index::Indexer {
+        graph: client.clone(),
+        lsp: None,
+        embedder: std::sync::Arc::new(StubEmbedder),
+        synthesizer: None,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("hello.rs");
+    std::fs::write(&f, "fn hello() { println!(\"hi\"); }\n").unwrap();
+    let f_utf8 = camino::Utf8PathBuf::from_path_buf(f).unwrap();
+    indexer
+        .index_file(&f_utf8, "fn hello() { println!(\"hi\"); }\n")
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(
+            "MATCH (s:Symbol) WHERE s.file_path ENDS WITH 'hello.rs' \
+             RETURN s.qualified_name, s.body_hash, s.embedding",
+        )
+        .await
+        .unwrap();
+    assert!(!rows.is_empty(), "expected at least one symbol");
+    for row in rows {
+        let body_hash = match &row[1] {
+            falkordb::FalkorValue::String(s) => s.clone(),
+            other => panic!("body_hash: {other:?}"),
+        };
+        assert_eq!(body_hash.len(), 64, "blake3 hex");
+    }
+}
