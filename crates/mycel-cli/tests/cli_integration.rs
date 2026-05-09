@@ -146,3 +146,48 @@ async fn set_description_unknown_qname_exits_nonzero_with_helpful_error() {
         .stderr(contains("no Symbol"))
         .stderr(contains("definers")); // hint Claude at the recovery path
 }
+
+#[tokio::test]
+async fn synthesize_refresh_hashes_only_backfills_legacy_rows() {
+    let graph_name = "mycel:cli_test:refresh";
+    let client = fresh_client(graph_name).await;
+
+    let legacy = Symbol {
+        qualified_name: QualifiedName::new("crate::legacy_sym"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn legacy_sym()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("legacy_h".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&legacy).await.unwrap();
+    client
+        .query(
+            "MATCH (s:Symbol {qualified_name: 'crate::legacy_sym'}) \
+             SET s.synthesized_description = 'old', s.embedding = vecf32([0.1])",
+        )
+        .await
+        .unwrap();
+
+    Command::cargo_bin("mycel")
+        .unwrap()
+        .env("MYCEL_TEST_GRAPH", graph_name)
+        .env("MYCEL_FALKORDB_URL", url())
+        .args(["synthesize", "--refresh-hashes-only"])
+        .assert()
+        .success()
+        .stdout(contains("backfilled 1"));
+
+    let info = client
+        .get_symbol_description("crate::legacy_sym")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.description_source_hash.as_deref(), Some("legacy_h"));
+}

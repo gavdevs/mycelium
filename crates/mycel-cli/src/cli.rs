@@ -45,6 +45,10 @@ pub enum Cmd {
         force: bool,
         #[arg(long)]
         limit: Option<usize>,
+        /// Backfill description_source_hash from body_hash for legacy rows
+        /// (descriptions written before 2026-05-05). Skips Ollama entirely.
+        #[arg(long, conflicts_with_all = ["force", "limit"])]
+        refresh_hashes_only: bool,
     },
     /// Print the current synthesized description for a Symbol, or "(none)".
     /// With --json, emits {qualified_name, description, body_hash, description_source_hash}.

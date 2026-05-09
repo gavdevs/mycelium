@@ -53,8 +53,13 @@ async fn main() -> anyhow::Result<()> {
             let n = indexer.index_repo(&path).await?;
             println!("indexed {n} files");
         }
-        Cmd::Synthesize { force, limit } => {
+        Cmd::Synthesize { force, limit, refresh_hashes_only } => {
             let g = open(&cfg, &cli.repo).await?;
+            if refresh_hashes_only {
+                let n = g.refresh_description_source_hashes().await?;
+                println!("backfilled {n} legacy description_source_hash row(s)");
+                return Ok(());
+            }
             let embedder = config::embedder_from_cfg(&cfg);
             let Some(synthesizer) = config::synthesizer_from_cfg(&cfg) else {
                 eprintln!("MYCEL_SYNTHESIZER=off — refusing to run. Unset the env var or remove [providers.synthesizer] from config to enable.");
