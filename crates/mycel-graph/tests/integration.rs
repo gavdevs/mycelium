@@ -10,6 +10,15 @@ fn url() -> String {
         .unwrap_or_else(|_| "redis://127.0.0.1:16379".into())
 }
 
+/// Connect to a per-test graph and wipe its contents so assertions aren't
+/// poisoned by state from prior `cargo test` invocations against the same
+/// FalkorDB container. Indices/vectors persist; node and edge data is reset.
+async fn fresh_client(graph_name: &str) -> GraphClient {
+    let client = GraphClient::connect(&url(), graph_name).await.unwrap();
+    client.query("MATCH (n) DETACH DELETE n").await.unwrap();
+    client
+}
+
 #[tokio::test]
 async fn connect_runs_migrations_idempotently() {
     let client = GraphClient::connect(&url(), "mycel:test:connect").await.unwrap();
@@ -170,7 +179,7 @@ async fn manifest_round_trip() {
 
 #[tokio::test]
 async fn upsert_symbol_writes_body_hash_when_set() {
-    let client = GraphClient::connect(&url(), "mycel:test:body_hash").await.unwrap();
+    let client = fresh_client("mycel:test:body_hash").await;
     let mut sym = Symbol {
         qualified_name: QualifiedName::new("crate::tests::with_hash"),
         kind: SymbolKind::Function,
@@ -223,7 +232,7 @@ async fn upsert_symbol_writes_body_hash_when_set() {
 
 #[tokio::test]
 async fn set_description_stamps_source_hash_from_body_hash() {
-    let client = GraphClient::connect(&url(), "mycel:test:source_hash").await.unwrap();
+    let client = fresh_client("mycel:test:source_hash").await;
     let sym = Symbol {
         qualified_name: QualifiedName::new("crate::stamp"),
         kind: SymbolKind::Function,
@@ -269,7 +278,7 @@ async fn set_description_stamps_source_hash_from_body_hash() {
 
 #[tokio::test]
 async fn get_symbol_description_returns_description_and_hashes() {
-    let client = GraphClient::connect(&url(), "mycel:test:get_desc").await.unwrap();
+    let client = fresh_client("mycel:test:get_desc").await;
     let sym = Symbol {
         qualified_name: QualifiedName::new("crate::getter"),
         kind: SymbolKind::Function,
@@ -321,7 +330,7 @@ async fn get_symbol_description_returns_description_and_hashes() {
 
 #[tokio::test]
 async fn description_source_hashes_for_batch_returns_only_described_rows() {
-    let client = GraphClient::connect(&url(), "mycel:test:hash_batch").await.unwrap();
+    let client = fresh_client("mycel:test:hash_batch").await;
 
     let described = Symbol {
         qualified_name: QualifiedName::new("crate::described_batch"),
@@ -382,7 +391,7 @@ async fn description_source_hashes_for_batch_empty_input_returns_empty() {
 
 #[tokio::test]
 async fn clear_description_and_reembed_resets_atomic() {
-    let client = GraphClient::connect(&url(), "mycel:test:clear").await.unwrap();
+    let client = fresh_client("mycel:test:clear").await;
     let sym = Symbol {
         qualified_name: QualifiedName::new("crate::clearer"),
         kind: SymbolKind::Function,
@@ -417,4 +426,115 @@ async fn clear_description_and_reembed_resets_atomic() {
     assert_eq!(info.description, None);
     assert_eq!(info.description_source_hash, None);
     assert_eq!(info.body_hash.as_deref(), Some("body-v2"));
+}
+
+#[tokio::test]
+async fn list_stale_descriptions_finds_diverged_hashes() {
+    let client = fresh_client("mycel:test:stale").await;
+
+    let a = Symbol {
+        qualified_name: QualifiedName::new("crate::fresh"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn fresh()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("h1".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&a).await.unwrap();
+    client
+        .set_symbol_description_and_embedding("crate::fresh", "Fresh.", &vec![0.0; 768])
+        .await
+        .unwrap();
+
+    let b = Symbol {
+        qualified_name: QualifiedName::new("crate::stale"),
+        body_hash: Some("h1".into()),
+        description_source_hash: None,
+        ..a.clone()
+    };
+    client.upsert_symbol(&b).await.unwrap();
+    client
+        .set_symbol_description_and_embedding("crate::stale", "Will go stale.", &vec![0.0; 768])
+        .await
+        .unwrap();
+    client
+        .query("MATCH (s:Symbol {qualified_name: 'crate::stale'}) SET s.body_hash = 'h2'")
+        .await
+        .unwrap();
+
+    let stale = client.list_stale_descriptions().await.unwrap();
+    let stale_qnames: std::collections::HashSet<_> =
+        stale.iter().map(|s| s.qualified_name.clone()).collect();
+    assert!(stale_qnames.contains("crate::stale"));
+    assert!(!stale_qnames.contains("crate::fresh"));
+}
+
+#[tokio::test]
+async fn refresh_description_source_hashes_only_touches_legacy_rows() {
+    let client = fresh_client("mycel:test:refresh").await;
+
+    let legacy = Symbol {
+        qualified_name: QualifiedName::new("crate::legacy"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn legacy()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("hL".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&legacy).await.unwrap();
+    client
+        .query(
+            "MATCH (s:Symbol {qualified_name: 'crate::legacy'}) \
+             SET s.synthesized_description = 'old desc', \
+                 s.embedding = vecf32([0.0])",
+        )
+        .await
+        .unwrap();
+
+    let modern = Symbol {
+        qualified_name: QualifiedName::new("crate::modern"),
+        body_hash: Some("hM".into()),
+        ..legacy.clone()
+    };
+    client.upsert_symbol(&modern).await.unwrap();
+    client
+        .set_symbol_description_and_embedding("crate::modern", "modern desc", &vec![0.0; 768])
+        .await
+        .unwrap();
+
+    let n = client.refresh_description_source_hashes().await.unwrap();
+    assert_eq!(n, 1, "exactly one legacy row backfilled");
+
+    let l = client
+        .get_symbol_description("crate::legacy")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        l.description_source_hash.as_deref(),
+        Some("hL"),
+        "legacy row's source_hash backfilled from body_hash"
+    );
+    let m = client
+        .get_symbol_description("crate::modern")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        m.description_source_hash.as_deref(),
+        Some("hM"),
+        "modern row untouched"
+    );
 }

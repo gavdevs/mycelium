@@ -395,6 +395,87 @@ impl GraphClient {
         }))
     }
 
+    /// Returns Symbols whose `description_source_hash` no longer matches
+    /// `body_hash`. These are descriptions written against a body that has
+    /// since been edited — stale by definition.
+    ///
+    /// Legacy graphs (Symbols with a description but NULL source_hash)
+    /// are NOT returned here. Run `refresh_description_source_hashes` once
+    /// to bring them under the staleness regime, then they participate
+    /// normally on subsequent edits.
+    ///
+    /// Uses `coalesce(...) <> ''` for "is set" checks because FalkorDB's
+    /// Cypher dialect treats equality against NULL as NULL (not false), so
+    /// `IS NOT NULL` predicates filter unreliably; see the doc-comment on
+    /// `list_symbols_for_synthesis` for the full reasoning.
+    pub async fn list_stale_descriptions(&self) -> Result<Vec<SymbolForSynthesis>> {
+        let cypher = "MATCH (s:Symbol) \
+             WHERE coalesce(s.synthesized_description, '') <> '' \
+               AND coalesce(s.description_source_hash, '') <> '' \
+               AND s.description_source_hash <> s.body_hash \
+             RETURN s.qualified_name, s.signature, s.file_path, s.start_line, s.end_line, \
+                    coalesce(s.synthesized_description, '') AS desc";
+        let rows = self.query(cypher).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let signature = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => String::new(),
+            };
+            let file_path = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let start_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let end_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let has_description = matches!(iter.next(), Some(FalkorValue::String(s)) if !s.is_empty());
+            out.push(SymbolForSynthesis {
+                qualified_name: qname,
+                signature,
+                file_path,
+                start_line,
+                end_line,
+                has_description,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Backfills `description_source_hash` from `body_hash` on Symbols that
+    /// already have a description but whose source_hash is NULL — i.e.,
+    /// descriptions written before the 2026-05-05 redirection. Returns the
+    /// number of rows updated.
+    pub async fn refresh_description_source_hashes(&self) -> Result<usize> {
+        let cypher = "MATCH (s:Symbol) \
+             WHERE coalesce(s.synthesized_description, '') <> '' \
+               AND coalesce(s.description_source_hash, '') = '' \
+               AND coalesce(s.body_hash, '') <> '' \
+             SET s.description_source_hash = s.body_hash \
+             RETURN count(s) AS updated";
+        let rows = self.query(cypher).await?;
+        let updated = rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::I64(n) => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        Ok(updated)
+    }
+
     /// Clears `synthesized_description` and `description_source_hash`, replaces
     /// `embedding` with the fresh signature+body embedding, and updates
     /// `body_hash` — all atomically. Used by the daemon's incremental path
