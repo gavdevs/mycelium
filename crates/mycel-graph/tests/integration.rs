@@ -266,3 +266,55 @@ async fn set_description_stamps_source_hash_from_body_hash() {
         other => panic!("source_hash: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn get_symbol_description_returns_description_and_hashes() {
+    let client = GraphClient::connect(&url(), "mycel:test:get_desc").await.unwrap();
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::getter"),
+        kind: SymbolKind::Function,
+        file_path: "src/lib.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn getter()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("body-x".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+
+    // Before write: description None, hashes (body=Some, source=None).
+    let info = client
+        .get_symbol_description("crate::getter")
+        .await
+        .unwrap()
+        .expect("symbol exists");
+    assert_eq!(info.description, None);
+    assert_eq!(info.body_hash.as_deref(), Some("body-x"));
+    assert_eq!(info.description_source_hash, None);
+
+    client
+        .set_symbol_description_and_embedding("crate::getter", "Gets stuff.", &vec![0.0f32; 768])
+        .await
+        .unwrap();
+
+    let info = client
+        .get_symbol_description("crate::getter")
+        .await
+        .unwrap()
+        .expect("symbol exists");
+    assert_eq!(info.description.as_deref(), Some("Gets stuff."));
+    assert_eq!(info.body_hash.as_deref(), Some("body-x"));
+    assert_eq!(info.description_source_hash.as_deref(), Some("body-x"));
+
+    assert!(
+        client
+            .get_symbol_description("crate::nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

@@ -31,6 +31,15 @@ pub struct SymbolNeighbor {
     pub signature: String,
 }
 
+/// A Symbol's description state plus the two hashes used to detect staleness.
+/// Used by `mycel describe` and the workload-driven synthesis skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDescriptionInfo {
+    pub description: Option<String>,
+    pub body_hash: Option<String>,
+    pub description_source_hash: Option<String>,
+}
+
 fn parse_neighbor_rows(rows: Vec<Vec<FalkorValue>>) -> Vec<SymbolNeighbor> {
     rows.into_iter()
         .filter_map(|row| {
@@ -346,6 +355,44 @@ impl GraphClient {
         );
         self.query(&cypher).await?;
         Ok(())
+    }
+
+    /// Returns the Symbol's current description plus the two hashes used to
+    /// detect staleness. `None` only when the qname doesn't match a Symbol
+    /// node — distinguishes "missing" from "exists but no description."
+    pub async fn get_symbol_description(
+        &self,
+        qname: &str,
+    ) -> Result<Option<SymbolDescriptionInfo>> {
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             RETURN coalesce(s.synthesized_description, '') AS desc, \
+                    coalesce(s.body_hash, '') AS bh, \
+                    coalesce(s.description_source_hash, '') AS sh",
+            q = escape(qname),
+        );
+        let rows = self.query(&cypher).await?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut iter = row.into_iter();
+        let desc = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let body_hash = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let source_hash = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        Ok(Some(SymbolDescriptionInfo {
+            description: desc,
+            body_hash,
+            description_source_hash: source_hash,
+        }))
     }
 
     pub async fn query_definers(&self, name: &str) -> Result<Vec<Symbol>> {

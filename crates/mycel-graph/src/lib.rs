@@ -12,3 +12,4 @@ pub mod vector;
 pub(crate) mod cypher;
 
 pub use client::GraphClient;
+pub use symbol::SymbolDescriptionInfo;
