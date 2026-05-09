@@ -395,6 +395,47 @@ impl GraphClient {
         }))
     }
 
+    /// Single-round-trip read of `description_source_hash` for a list of
+    /// qualified names. Symbols with no description (or whose source_hash
+    /// is unset) are absent from the returned map. Used by the daemon's
+    /// incremental staleness pre-pass to avoid N round-trips per file.
+    ///
+    /// Empty input returns an empty map without issuing a Cypher query.
+    pub async fn description_source_hashes_for_batch(
+        &self,
+        qnames: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if qnames.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let in_list = qnames
+            .iter()
+            .map(|q| format!("'{}'", escape(q)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cypher = format!(
+            "MATCH (s:Symbol) \
+             WHERE s.qualified_name IN [{in_list}] \
+               AND coalesce(s.description_source_hash, '') <> '' \
+             RETURN s.qualified_name, s.description_source_hash"
+        );
+        let rows = self.query(&cypher).await?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let hash = match iter.next() {
+                Some(FalkorValue::String(s)) if !s.is_empty() => s,
+                _ => continue,
+            };
+            out.insert(qname, hash);
+        }
+        Ok(out)
+    }
+
     pub async fn query_definers(&self, name: &str) -> Result<Vec<Symbol>> {
         let cypher = format!(
             "MATCH (s:Symbol) WHERE s.name = '{name}' OR s.qualified_name = '{name}' \

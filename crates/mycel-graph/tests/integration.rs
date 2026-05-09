@@ -318,3 +318,64 @@ async fn get_symbol_description_returns_description_and_hashes() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn description_source_hashes_for_batch_returns_only_described_rows() {
+    let client = GraphClient::connect(&url(), "mycel:test:hash_batch").await.unwrap();
+
+    let described = Symbol {
+        qualified_name: QualifiedName::new("crate::described_batch"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn described_batch()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("hd".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&described).await.unwrap();
+    client
+        .set_symbol_description_and_embedding(
+            "crate::described_batch",
+            "Has desc.",
+            &vec![0.0; 768],
+        )
+        .await
+        .unwrap();
+
+    let undescribed = Symbol {
+        qualified_name: QualifiedName::new("crate::undescribed_batch"),
+        body_hash: Some("hu".into()),
+        ..described.clone()
+    };
+    client.upsert_symbol(&undescribed).await.unwrap();
+
+    let map = client
+        .description_source_hashes_for_batch(&[
+            "crate::described_batch",
+            "crate::undescribed_batch",
+            "crate::nonexistent",
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        map.get("crate::described_batch").map(|s| s.as_str()),
+        Some("hd")
+    );
+    assert!(!map.contains_key("crate::undescribed_batch"));
+    assert!(!map.contains_key("crate::nonexistent"));
+}
+
+#[tokio::test]
+async fn description_source_hashes_for_batch_empty_input_returns_empty() {
+    let client = GraphClient::connect(&url(), "mycel:test:hash_batch_empty")
+        .await
+        .unwrap();
+    let map = client.description_source_hashes_for_batch(&[]).await.unwrap();
+    assert!(map.is_empty());
+}
