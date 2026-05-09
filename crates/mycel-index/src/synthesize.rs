@@ -11,11 +11,11 @@
 //! individual symbols are logged at WARN and do not abort the run; one bad
 //! synth shouldn't poison the whole repo's Phase 2 lift.
 
+use crate::body_slice::{FileCache, read_body_slice};
 use mycel_core::*;
 use mycel_graph::GraphClient;
 use mycel_graph::symbol::{SymbolForSynthesis, SynthesisContext};
 use mycel_models::{Embedder, Synthesizer};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -23,11 +23,6 @@ use tracing::{debug, info, warn};
 /// Three each keeps the prompt small enough for `gemma4:e2b` without losing
 /// the structural signal that justifies graph-augmented synthesis.
 const NEIGHBOR_LIMIT: usize = 3;
-
-/// Cap on body lines to include in the prompt. A 200-line function still
-/// fits in `gemma4:e2b`'s context, but a 2000-line legacy file would blow
-/// the budget — clip to the first `BODY_LINE_CAP` lines.
-const BODY_LINE_CAP: usize = 60;
 
 pub struct SynthesisOptions {
     /// Re-synthesize even if a description already exists.
@@ -79,7 +74,7 @@ pub async fn synthesize_descriptions(
     // Most files have multiple symbols; a small HashMap pays for itself
     // immediately. UTF-8-only — non-text files are not in the symbol set
     // anyway.
-    let mut file_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut file_cache: FileCache = FileCache::new();
 
     let mut synthesized = 0usize;
     let mut skipped = 0usize;
@@ -184,35 +179,6 @@ pub async fn synthesize_descriptions(
         skipped,
         failed,
     })
-}
-
-/// Lazily read and cache the lines of a file. Returns None if the file is
-/// missing or non-UTF-8 — both treated as "no body available," which is
-/// fine: the prompt has signature + neighbors as fallback signal.
-fn read_body_slice(
-    cache: &mut HashMap<String, Option<Vec<String>>>,
-    path: &str,
-    start: u32,
-    end: u32,
-) -> Option<String> {
-    let entry = cache.entry(path.to_string()).or_insert_with(|| {
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|s| s.lines().map(|l| l.to_string()).collect())
-    });
-    let lines = entry.as_ref()?;
-    let start_idx = (start.saturating_sub(1)) as usize;
-    let end_idx = (end as usize).min(lines.len());
-    if start_idx >= end_idx {
-        return None;
-    }
-    let slice = &lines[start_idx..end_idx];
-    let cap = BODY_LINE_CAP.min(slice.len());
-    let mut body = slice[..cap].join("\n");
-    if slice.len() > cap {
-        body.push_str("\n// ... (body truncated)");
-    }
-    Some(body)
 }
 
 fn build_prompt(sym: &SymbolForSynthesis, body: Option<&str>, ctx: &SynthesisContext) -> String {
@@ -348,54 +314,4 @@ mod tests {
         assert!(prompt.trim_end().ends_with("Description:"));
     }
 
-    #[test]
-    fn read_body_slice_caps_long_bodies() {
-        let dir = tempdir_for_test();
-        let p = dir.join("big.rs");
-        let content: String = (1..=200)
-            .map(|i| format!("line{i}\n"))
-            .collect();
-        std::fs::write(&p, &content).unwrap();
-
-        let mut cache = HashMap::new();
-        let body = read_body_slice(&mut cache, p.to_str().unwrap(), 1, 200).unwrap();
-        // Should include the truncation marker since 200 > BODY_LINE_CAP.
-        assert!(body.contains("(body truncated)"));
-        // First line preserved.
-        assert!(body.starts_with("line1"));
-    }
-
-    #[test]
-    fn read_body_slice_handles_missing_file_and_caches_negative() {
-        let dir = tempdir_for_test();
-        let path = dir.join("not-yet.rs");
-        let path_str = path.to_str().unwrap();
-
-        let mut cache = HashMap::new();
-        // First call: file doesn't exist, expect None.
-        assert!(read_body_slice(&mut cache, path_str, 1, 10).is_none());
-
-        // Now create the file. A non-caching implementation would re-read
-        // it and return Some(...) on the second call; the caching one
-        // remembers None and short-circuits.
-        std::fs::write(&path, "let x = 1;\n").unwrap();
-        assert!(
-            read_body_slice(&mut cache, path_str, 1, 10).is_none(),
-            "negative result should be cached even after the file appears"
-        );
-    }
-
-    fn tempdir_for_test() -> std::path::PathBuf {
-        // Use the OS temp dir + a unique-ish suffix; avoids pulling in the
-        // tempfile crate just for these unit tests. Cleanup is best-effort.
-        let dir = std::env::temp_dir().join(format!(
-            "mycel-synth-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 }

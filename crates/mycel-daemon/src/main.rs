@@ -58,12 +58,10 @@ async fn main() -> Result<()> {
     if lsp.is_none() {
         warn!("multilspy bridge unavailable; proceeding with tree-sitter only");
     }
-    // Daemon's incremental path skips synthesis — per-file edits shouldn't
-    // pay an LLM call apiece. Cold first index here also skips synthesis;
-    // operators who want descriptions on the daemon's initial pass should
-    // run `mycel synthesize` once after `mycel daemon start`, or invoke
-    // `mycel index` from the CLI on first install.
-    let indexer = Indexer { graph, lsp, embedder, synthesizer: None };
+    // Cold and incremental indexing both embed signature+body slice; behavioral
+    // descriptions are written workload-driven by Claude via `mycel set-description`
+    // (per the mycel-graph-care skill).
+    let indexer = Indexer { graph, lsp, embedder };
 
     info!("starting initial index");
     let n = indexer.index_repo(&repo_canon).await?;

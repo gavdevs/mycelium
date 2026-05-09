@@ -3,7 +3,7 @@ use mycel_core::*;
 use mycel_extract::for_language;
 use mycel_graph::GraphClient;
 use mycel_lsp::MultilspyResolver;
-use mycel_models::{Embedder, Synthesizer};
+use mycel_models::Embedder;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -11,11 +11,6 @@ pub struct Indexer {
     pub graph: GraphClient,
     pub lsp: Option<Arc<MultilspyResolver>>,
     pub embedder: Arc<dyn Embedder>,
-    /// Phase 2 description synthesizer. `None` on the daemon's incremental
-    /// path (per-file edits don't pay the LLM cost on every save) and on
-    /// `mycel index --no-descriptions`. When `Some`, `index_repo` runs a
-    /// final synthesis pass that re-embeds every symbol on its description.
-    pub synthesizer: Option<Arc<dyn Synthesizer>>,
 }
 
 impl Indexer {
@@ -87,20 +82,51 @@ impl Indexer {
         }
         self.graph.upsert_symbol_batch(&extraction.symbols).await?;
 
-        // 5. Embed signatures (Phase 1: signature-only).
+        // 5. Embed signature + body slice; handle description staleness via
+        //    a single batched pre-read.
         //
-        // CRITICAL: pair each symbol with its OWN embedding. The chunk-of-32
-        // batching means we must zip the symbol-chunk with the text-chunk,
-        // not zip `extraction.symbols.iter()` (which always restarts at 0)
-        // with the most recent batch's vectors.
+        //    Sequence:
+        //      a) Compute (text, hash) for every Symbol's body slice.
+        //      b) Single Cypher round-trip: fetch description_source_hash for
+        //         this file's Symbols.
+        //      c) Batched embed (chunk-of-32, mirroring the cold-index shape).
+        //      d) Per-Symbol write: if (b) returned a hash AND it diverges
+        //         from the new body_hash, clear+reembed; otherwise just
+        //         write embedding+body_hash.
         if !extraction.symbols.is_empty() {
-            let texts: Vec<&str> = extraction
+            use crate::body_slice::{FileCache, signature_plus_body_slice};
+            let mut cache = FileCache::new();
+            let prepared: Vec<(String, String)> = extraction
                 .symbols
                 .iter()
-                .map(|s| s.signature.as_str())
+                .map(|s| {
+                    let bs = signature_plus_body_slice(
+                        &mut cache,
+                        s.signature.as_str(),
+                        s.file_path.as_str(),
+                        s.start_line,
+                        s.end_line,
+                    );
+                    (bs.text, bs.hash)
+                })
                 .collect();
-            for (sym_chunk, text_chunk) in extraction.symbols.chunks(32).zip(texts.chunks(32)) {
-                let vecs = self.embedder.embed(text_chunk).await?;
+
+            let qnames: Vec<&str> = extraction
+                .symbols
+                .iter()
+                .map(|s| s.qualified_name.as_str())
+                .collect();
+            let stored_source_hashes = self
+                .graph
+                .description_source_hashes_for_batch(&qnames)
+                .await?;
+
+            let mut all_vecs: Vec<Vec<f32>> = Vec::with_capacity(prepared.len());
+            for (sym_chunk, prep_chunk) in
+                extraction.symbols.chunks(32).zip(prepared.chunks(32))
+            {
+                let text_chunk: Vec<&str> = prep_chunk.iter().map(|(t, _)| t.as_str()).collect();
+                let vecs = self.embedder.embed(&text_chunk).await?;
                 if vecs.len() != sym_chunk.len() {
                     return Err(MycelError::Model {
                         provider: self.embedder.identity().into(),
@@ -111,9 +137,34 @@ impl Indexer {
                         ),
                     });
                 }
-                for (sym, vec) in sym_chunk.iter().zip(vecs.iter()) {
+                all_vecs.extend(vecs);
+            }
+            debug_assert_eq!(all_vecs.len(), prepared.len());
+
+            for ((sym, (_, new_hash)), vec) in extraction
+                .symbols
+                .iter()
+                .zip(prepared.iter())
+                .zip(all_vecs.iter())
+            {
+                let stale = stored_source_hashes
+                    .get(sym.qualified_name.as_str())
+                    .is_some_and(|src| src.as_str() != new_hash.as_str());
+                if stale {
                     self.graph
-                        .set_symbol_embedding(sym.qualified_name.as_str(), vec)
+                        .clear_symbol_description_and_reembed(
+                            sym.qualified_name.as_str(),
+                            new_hash,
+                            vec,
+                        )
+                        .await?;
+                } else {
+                    self.graph
+                        .set_symbol_embedding_and_body_hash(
+                            sym.qualified_name.as_str(),
+                            vec,
+                            new_hash,
+                        )
                         .await?;
                 }
             }
@@ -210,28 +261,6 @@ impl Indexer {
             last_indexed_at: time::OffsetDateTime::now_utc(),
         };
         self.graph.write_manifest(&manifest).await?;
-
-        // Phase 2: description synthesis as a final pass. Runs only when a
-        // synthesizer is configured (i.e., not on the daemon's per-file
-        // path). Re-embeds each described symbol on its description so
-        // vector search clusters by behavior — this is where retrieval
-        // quality jumps over Phase 1's signature-only embeddings.
-        if let Some(synth) = &self.synthesizer {
-            let outcome = crate::synthesize::synthesize_descriptions(
-                &self.graph,
-                synth.clone(),
-                self.embedder.clone(),
-                crate::synthesize::SynthesisOptions::default(),
-            )
-            .await?;
-            info!(
-                considered = outcome.considered,
-                synthesized = outcome.synthesized,
-                skipped = outcome.skipped,
-                failed = outcome.failed,
-                "phase 2 synthesis pass complete"
-            );
-        }
 
         Ok(count)
     }

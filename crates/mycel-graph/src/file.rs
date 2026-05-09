@@ -71,17 +71,28 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Sets the embedding vector property on a Symbol node.
-    pub async fn set_symbol_embedding(&self, qualified_name: &str, vec: &[f32]) -> Result<()> {
-        let vec_lit = vec
+    /// Writes embedding and body_hash atomically. The two fields must move
+    /// together — body_hash describes which `signature + body slice` the
+    /// embedding was computed against. Splitting the write would let the
+    /// daemon observe a stale embedding paired with a fresh hash (or vice
+    /// versa) and falsely conclude staleness was/wasn't present.
+    pub async fn set_symbol_embedding_and_body_hash(
+        &self,
+        qname: &str,
+        embedding: &[f32],
+        body_hash: &str,
+    ) -> Result<()> {
+        let vec_lit = embedding
             .iter()
             .map(|f| f.to_string())
             .collect::<Vec<_>>()
             .join(",");
         let cypher = format!(
-            "MATCH (s:Symbol {{qualified_name: '{q}'}}) SET s.embedding = vecf32([{v}])",
-            q = escape(qualified_name),
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             SET s.embedding = vecf32([{v}]), s.body_hash = '{h}'",
+            q = escape(qname),
             v = vec_lit,
+            h = escape(body_hash),
         );
         self.query(&cypher).await?;
         Ok(())

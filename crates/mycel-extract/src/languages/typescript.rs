@@ -162,6 +162,8 @@ fn extract_symbols_and_edges(
                     synthesized_description: None,
                     exported,
                     embedding: None,
+                    body_hash: None,
+                    description_source_hash: None,
                 });
         }
     }

@@ -31,6 +31,15 @@ pub struct SymbolNeighbor {
     pub signature: String,
 }
 
+/// A Symbol's description state plus the two hashes used to detect staleness.
+/// Used by `mycel describe` and the workload-driven synthesis skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDescriptionInfo {
+    pub description: Option<String>,
+    pub body_hash: Option<String>,
+    pub description_source_hash: Option<String>,
+}
+
 fn parse_neighbor_rows(rows: Vec<Vec<FalkorValue>>) -> Vec<SymbolNeighbor> {
     rows.into_iter()
         .filter_map(|row| {
@@ -135,6 +144,8 @@ pub(crate) fn parse_symbol_row(row: Vec<FalkorValue>) -> Option<Symbol> {
         synthesized_description: None,
         exported,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     })
 }
 
@@ -146,6 +157,13 @@ impl GraphClient {
     pub async fn upsert_symbol(&self, sym: &Symbol) -> Result<()> {
         let kind = serde_json::to_value(sym.kind).expect("SymbolKind serializes infallibly");
         let kind_str = kind.as_str().expect("SymbolKind serializes as JSON string");
+        // body_hash is computed by the indexing pipeline, not by the extractor;
+        // an upsert from extracted-Symbol-only paths leaves it None and we must
+        // NOT clobber a hash a previous pipeline pass already wrote.
+        let body_hash_clause = match &sym.body_hash {
+            Some(h) => format!(", s.body_hash = '{}'", escape(h)),
+            None => String::new(),
+        };
         let cypher = format!(
             r#"MERGE (s:Symbol {{qualified_name: '{qname}'}})
             SET s.kind = '{kind}',
@@ -154,7 +172,7 @@ impl GraphClient {
                 s.end_line = {end},
                 s.signature = '{sig}',
                 s.exported = {exported},
-                s.name = '{name}'"#,
+                s.name = '{name}'{body_hash_clause}"#,
             qname = escape(sym.qualified_name.as_str()),
             kind = kind_str,
             file = escape(sym.file_path.as_str()),
@@ -320,15 +338,237 @@ impl GraphClient {
             .map(|f| f.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // Atomic write: description, embedding, AND description_source_hash
+        // (mirrored from the Symbol's current body_hash) all land in a single
+        // statement so a stale hash can never be observed against a fresh
+        // description. Legacy Symbols whose body_hash hasn't been backfilled
+        // get NULL source_hash, which the daemon's staleness pass treats as
+        // "do not invalidate."
         let cypher = format!(
             "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
-             SET s.synthesized_description = '{d}', s.embedding = vecf32([{v}])",
+             SET s.synthesized_description = '{d}', \
+                 s.embedding = vecf32([{v}]), \
+                 s.description_source_hash = s.body_hash",
             q = escape(qname),
             d = escape(description),
             v = vec_lit,
         );
         self.query(&cypher).await?;
         Ok(())
+    }
+
+    /// Returns the Symbol's current description plus the two hashes used to
+    /// detect staleness. `None` only when the qname doesn't match a Symbol
+    /// node — distinguishes "missing" from "exists but no description."
+    pub async fn get_symbol_description(
+        &self,
+        qname: &str,
+    ) -> Result<Option<SymbolDescriptionInfo>> {
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             RETURN coalesce(s.synthesized_description, '') AS desc, \
+                    coalesce(s.body_hash, '') AS bh, \
+                    coalesce(s.description_source_hash, '') AS sh",
+            q = escape(qname),
+        );
+        let rows = self.query(&cypher).await?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut iter = row.into_iter();
+        let desc = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let body_hash = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let source_hash = match iter.next() {
+            Some(FalkorValue::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        Ok(Some(SymbolDescriptionInfo {
+            description: desc,
+            body_hash,
+            description_source_hash: source_hash,
+        }))
+    }
+
+    /// Wipes synthesized_description and description_source_hash on every
+    /// Symbol in the graph. Embeddings are NOT cleared — the next index
+    /// pass will overwrite them with fresh signature+body embeddings via
+    /// `set_symbol_embedding_and_body_hash`. Returns the number of rows
+    /// affected.
+    pub async fn clear_all_descriptions(&self) -> Result<usize> {
+        let cypher = "MATCH (s:Symbol) WHERE coalesce(s.synthesized_description, '') <> '' \
+             SET s.synthesized_description = NULL, s.description_source_hash = NULL \
+             RETURN count(s) AS cleared";
+        let rows = self.query(cypher).await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::I64(n) => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(0))
+    }
+
+    /// Returns Symbols whose `description_source_hash` no longer matches
+    /// `body_hash`. These are descriptions written against a body that has
+    /// since been edited — stale by definition.
+    ///
+    /// Legacy graphs (Symbols with a description but NULL source_hash)
+    /// are NOT returned here. Run `refresh_description_source_hashes` once
+    /// to bring them under the staleness regime, then they participate
+    /// normally on subsequent edits.
+    ///
+    /// Uses `coalesce(...) <> ''` for "is set" checks because FalkorDB's
+    /// Cypher dialect treats equality against NULL as NULL (not false), so
+    /// `IS NOT NULL` predicates filter unreliably; see the doc-comment on
+    /// `list_symbols_for_synthesis` for the full reasoning.
+    pub async fn list_stale_descriptions(&self) -> Result<Vec<SymbolForSynthesis>> {
+        let cypher = "MATCH (s:Symbol) \
+             WHERE coalesce(s.synthesized_description, '') <> '' \
+               AND coalesce(s.description_source_hash, '') <> '' \
+               AND s.description_source_hash <> s.body_hash \
+             RETURN s.qualified_name, s.signature, s.file_path, s.start_line, s.end_line, \
+                    coalesce(s.synthesized_description, '') AS desc";
+        let rows = self.query(cypher).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let signature = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => String::new(),
+            };
+            let file_path = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let start_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let end_line = match iter.next() {
+                Some(FalkorValue::I64(n)) => n as u32,
+                _ => 0,
+            };
+            let has_description = matches!(iter.next(), Some(FalkorValue::String(s)) if !s.is_empty());
+            out.push(SymbolForSynthesis {
+                qualified_name: qname,
+                signature,
+                file_path,
+                start_line,
+                end_line,
+                has_description,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Backfills `description_source_hash` from `body_hash` on Symbols that
+    /// already have a description but whose source_hash is NULL — i.e.,
+    /// descriptions written before the 2026-05-05 redirection. Returns the
+    /// number of rows updated.
+    pub async fn refresh_description_source_hashes(&self) -> Result<usize> {
+        let cypher = "MATCH (s:Symbol) \
+             WHERE coalesce(s.synthesized_description, '') <> '' \
+               AND coalesce(s.description_source_hash, '') = '' \
+               AND coalesce(s.body_hash, '') <> '' \
+             SET s.description_source_hash = s.body_hash \
+             RETURN count(s) AS updated";
+        let rows = self.query(cypher).await?;
+        let updated = rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::I64(n) => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        Ok(updated)
+    }
+
+    /// Clears `synthesized_description` and `description_source_hash`, replaces
+    /// `embedding` with the fresh signature+body embedding, and updates
+    /// `body_hash` — all atomically. Used by the daemon's incremental path
+    /// when a Symbol's body has changed since its description was written.
+    ///
+    /// We do NOT preserve the old description. A description written against
+    /// a function body that no longer exists is worse than no description at
+    /// all — `find` clusters around behavior that's been removed/refactored.
+    pub async fn clear_symbol_description_and_reembed(
+        &self,
+        qname: &str,
+        new_body_hash: &str,
+        new_embedding: &[f32],
+    ) -> Result<()> {
+        let vec_lit = new_embedding
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             SET s.synthesized_description = NULL, \
+                 s.description_source_hash = NULL, \
+                 s.body_hash = '{h}', \
+                 s.embedding = vecf32([{v}])",
+            q = escape(qname),
+            h = escape(new_body_hash),
+            v = vec_lit,
+        );
+        self.query(&cypher).await?;
+        Ok(())
+    }
+
+    /// Single-round-trip read of `description_source_hash` for a list of
+    /// qualified names. Symbols with no description (or whose source_hash
+    /// is unset) are absent from the returned map. Used by the daemon's
+    /// incremental staleness pre-pass to avoid N round-trips per file.
+    ///
+    /// Empty input returns an empty map without issuing a Cypher query.
+    pub async fn description_source_hashes_for_batch(
+        &self,
+        qnames: &[&str],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if qnames.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let in_list = qnames
+            .iter()
+            .map(|q| format!("'{}'", escape(q)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cypher = format!(
+            "MATCH (s:Symbol) \
+             WHERE s.qualified_name IN [{in_list}] \
+               AND coalesce(s.description_source_hash, '') <> '' \
+             RETURN s.qualified_name, s.description_source_hash"
+        );
+        let rows = self.query(&cypher).await?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            let mut iter = row.into_iter();
+            let qname = match iter.next() {
+                Some(FalkorValue::String(s)) => s,
+                _ => continue,
+            };
+            let hash = match iter.next() {
+                Some(FalkorValue::String(s)) if !s.is_empty() => s,
+                _ => continue,
+            };
+            out.insert(qname, hash);
+        }
+        Ok(out)
     }
 
     pub async fn query_definers(&self, name: &str) -> Result<Vec<Symbol>> {

@@ -18,11 +18,11 @@ pub struct Cli {
 pub enum Cmd {
     Index {
         path: Utf8PathBuf,
-        /// Skip the Phase 2 description-synthesis pass at the end of indexing.
-        /// Use this for fast cold first-indexes where signature embeddings are
-        /// good enough; you can run `mycel synthesize` later to upgrade.
+        /// Wipe all existing descriptions before indexing — useful when
+        /// abandoning eager-synth descriptions in favor of workload-driven
+        /// fill via the mycel-graph-care skill.
         #[arg(long)]
-        no_descriptions: bool,
+        force_cold_rebuild: bool,
     },
     Callers { symbol: String },
     Callees { symbol: String },
@@ -45,8 +45,37 @@ pub enum Cmd {
         force: bool,
         #[arg(long)]
         limit: Option<usize>,
+        /// Backfill description_source_hash from body_hash for legacy rows
+        /// (descriptions written before 2026-05-05). Skips Ollama entirely.
+        #[arg(long, conflicts_with_all = ["force", "limit"])]
+        refresh_hashes_only: bool,
     },
+    /// Print the current synthesized description for a Symbol, or "(none)".
+    /// With --json, emits {qualified_name, description, body_hash, description_source_hash}.
+    Describe { qname: String },
+    /// Write a behavioral description for a Symbol. Embeds the description
+    /// text and atomically updates the Symbol's description + embedding +
+    /// description_source_hash. Used by the mycel-graph-care skill to record
+    /// understanding gained while reading code.
+    SetDescription {
+        /// The Symbol's qualified_name. Get this from
+        /// `mycel definers <name> --json`.
+        #[arg(long)]
+        qname: String,
+        /// 1-3 sentence behavioral description.
+        #[arg(long)]
+        description: String,
+    },
+    /// Manage Claude Code skills shipped with Mycelium.
+    Skill { #[command(subcommand)] action: SkillAction },
     Daemon { #[command(subcommand)] action: DaemonAction },
+}
+
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// Symlink <repo>/skills/mycel-graph-care into ~/.claude/skills/.
+    /// Idempotent. Run from a Mycelium repo checkout.
+    Install,
 }
 
 #[derive(Subcommand)]

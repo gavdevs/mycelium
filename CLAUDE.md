@@ -13,22 +13,27 @@ Run from the repo root (`target/release/mycel`; not on PATH):
 | Task | Command | Status |
 |------|---------|--------|
 | Find a symbol by name | `target/release/mycel --repo . definers <name>` | **Works** — returns file/line-range/signature |
-| Semantic exploration | `target/release/mycel --repo . find '<query>'` | **Improving** — Phase 2 lands description-based embeddings; quality jumps as `mycel synthesize` runs across the graph |
-| Run Phase 2 description synthesis | `target/release/mycel --repo . synthesize [--force] [--limit N]` | **Works** — synthesizes a behavioral description per Symbol via Ollama, then re-embeds. Idempotent. |
+| Semantic exploration | `target/release/mycel --repo . find '<query>'` | **Works baseline** — embeds signature+body slice on cold index; quality lifts further as the `mycel-graph-care` skill writes descriptions for symbols you read |
+| Run bulk description synthesis (manual / non-Claude path) | `target/release/mycel --repo . synthesize [--force] [--limit N]` | **Works** — opt-in bulk pass via Ollama. Not run by `mycel index` after the 2026-05-05 redirection. |
+| Read a Symbol's current description | `target/release/mycel --repo . describe <qname>` | **Works** |
+| Write a behavioral description (workload-driven) | `target/release/mycel --repo . set-description --qname <qname> --description "<text>"` | **Works** — invoked by the `mycel-graph-care` skill |
+| Install the graph-care skill into Claude Code | `target/release/mycel --repo . skill install` | **Works** |
+| Backfill legacy description hashes | `target/release/mycel --repo . synthesize --refresh-hashes-only` | **Works** — one-shot for graphs predating 2026-05-05 |
+| Re-index from scratch (drop legacy descriptions) | `target/release/mycel --repo . index . --force-cold-rebuild` | **Works** |
 | Callers/callees | `target/release/mycel --repo . callers <name>` | **Broken** — returns empty; use grep |
 | Type usage | `target/release/mycel --repo . uses <type>` | **Broken** — returns empty; use grep |
 | Interface implementations | `target/release/mycel --repo . implements <iface>` | **Broken** — IMPLEMENTS edges not landing; use grep |
 
 Add `--json` for structured output. If you've rebuilt the daemon: `target/release/mycel daemon stop && target/release/mycel daemon start`.
 
-`mycel index` runs the description-synthesis pass automatically at the end on a configured synthesizer (`MYCEL_SYNTHESIZER=off` to disable, `--no-descriptions` flag for a fast cold reindex). The daemon's incremental path always skips synth — per-file edits don't pay an LLM call apiece. After daemon-driven reindexes, run `mycel synthesize` to refresh descriptions across the graph.
+`mycel index` does NOT run description synthesis (post-2026-05-05 redirection). Cold-index embeddings are computed on `signature + body[:60 lines]` — fast, no LLM round-trips. Behavioral descriptions are written by Claude Code itself when you've read and reasoned about a function, via `mycel set-description`, instructed by the shipped `mycel-graph-care` skill. The bulk `mycel synthesize` command remains as a manual fallback for non-Claude workflows. When the daemon's watcher detects an edit that changes a Symbol's body slice, the corresponding stored description (if any) is cleared automatically and the symbol is re-embedded on the new signature+body — Claude refills the description next time it reads and understands the function.
 
 ## Phase 1 / Phase 2 limitations to be aware of
 
 These are tracked and being worked on; flag them when they bite, don't try to fix in passing:
 
-- **`find` quality depends on description coverage.** Phase 2 ships description synthesis — a freshly indexed graph has signature-embedded symbols until `mycel synthesize` runs. Symbols with descriptions cluster by behavior; signature-embedded symbols cluster by name shape. Mixed states (partial coverage) give mixed results.
-- **Module-declaration hallucinations.** Single-line `mod foo;` symbols get rich behavioral descriptions hallucinated from the module's name only (e.g., `mod launchd;` → "core logic for managing background services… launching system daemons"), which cluster against unrelated queries. Known follow-up: skip `SymbolKind::Module` in `list_symbols_for_synthesis`. Until then, filter top results by `kind` if a module decl is dragging your search off course.
+- **`find` quality depends on description coverage.** Phase 2 ships description synthesis — a freshly indexed graph has signature+body-slice-embedded symbols until Claude (via the `mycel-graph-care` skill) writes behavioral descriptions for the symbols you actually work with — coverage grows with use, not with a one-shot bulk command. Symbols with descriptions cluster by behavior; signature-embedded symbols cluster by name shape. Mixed states (partial coverage) give mixed results.
+- **Module-declaration hallucinations.** (Applies to the bulk `mycel synthesize` path; the workload-driven skill instructs Claude to skip module decls.) Single-line `mod foo;` symbols get rich behavioral descriptions hallucinated from the module's name only (e.g., `mod launchd;` → "core logic for managing background services… launching system daemons"), which cluster against unrelated queries. Known follow-up: skip `SymbolKind::Module` in `list_symbols_for_synthesis`. Until then, filter top results by `kind` if a module decl is dragging your search off course.
 - **HNSW low-k flakiness.** FalkorDB's HNSW vector index walks adaptively; at `--limit < 10` it sometimes returns zero rows on valid queries that have answers at `--limit 20`. Default is `20` post-Phase 2; raise it further if you suspect a result is being clipped.
 - **`callers`, `uses`, `implements` all return empty.** Benchmarked: `callers content_hash` → empty (grep found 3 callers). `uses Symbol` → empty (grep found 67). `implements Embedder` → empty (OllamaEmbedder clearly implements it). CALLS, TYPED_BY, and IMPLEMENTS edges are not landing. Phase 2/3 work.
 - **Cross-file CALLS edges drop silently.** Tree-sitter only resolves same-file callees; the multilspy bridge currently emits degenerate `REFERENCES` so cross-file CALLS don't land. Phase 2/3 territory.
@@ -69,7 +74,7 @@ Schema (Symbol/Edge node types, EdgeKind enum, manifest) lives in `mycel-core`. 
 ## Phase plan (DESIGN.md is authoritative)
 
 - **Phase 1 (v0)** — symbol graph, Tier 1 queries, signature-embedded `find`. **Shipped.**
-- **Phase 2** — synthesizer wired (gemma4:e2b/e4b/qwen3.6:35b-a3b), description generation with 1-hop graph context, re-embed on descriptions. **Shipped 2026-05-04.** Run `mycel synthesize` to upgrade an existing graph from signature- to description-embeddings.
+- **Phase 2** — workload-driven description synthesis. Cold index embeds signature+body slice; behavioral descriptions are written by Claude via the `mycel-graph-care` skill (`set-description` CLI). Bulk `mycel synthesize` remains as opt-in fallback. **Shipped 2026-05-04**, redirected 2026-05-05 (see `docs/superpowers/specs/2026-05-05-workload-driven-synthesis-design.md`).
 - **Phase 3** — reranker + full Tier 4 (vector → graph expand → rerank), reranker eval harness.
 - **Phase 4** — git-derived edges (`CO_CHANGED`, `TESTED_BY`), Tier 3 queries.
 - **Phase 5** — personalization layers, the SKILL.md, token measurement, cloud providers.
