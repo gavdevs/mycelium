@@ -82,10 +82,17 @@ impl Indexer {
         }
         self.graph.upsert_symbol_batch(&extraction.symbols).await?;
 
-        // 5. Embed signature + body slice. Phase 2 (post-2026-05-05) cold
-        //    index no longer runs the Synthesizer; the embedding source is
-        //    the same string body_hash is computed over so embedding and
-        //    hash always move together.
+        // 5. Embed signature + body slice; handle description staleness via
+        //    a single batched pre-read.
+        //
+        //    Sequence:
+        //      a) Compute (text, hash) for every Symbol's body slice.
+        //      b) Single Cypher round-trip: fetch description_source_hash for
+        //         this file's Symbols.
+        //      c) Batched embed (chunk-of-32, mirroring the cold-index shape).
+        //      d) Per-Symbol write: if (b) returned a hash AND it diverges
+        //         from the new body_hash, clear+reembed; otherwise just
+        //         write embedding+body_hash.
         if !extraction.symbols.is_empty() {
             use crate::body_slice::{FileCache, signature_plus_body_slice};
             let mut cache = FileCache::new();
@@ -103,6 +110,18 @@ impl Indexer {
                     (bs.text, bs.hash)
                 })
                 .collect();
+
+            let qnames: Vec<&str> = extraction
+                .symbols
+                .iter()
+                .map(|s| s.qualified_name.as_str())
+                .collect();
+            let stored_source_hashes = self
+                .graph
+                .description_source_hashes_for_batch(&qnames)
+                .await?;
+
+            let mut all_vecs: Vec<Vec<f32>> = Vec::with_capacity(prepared.len());
             for (sym_chunk, prep_chunk) in
                 extraction.symbols.chunks(32).zip(prepared.chunks(32))
             {
@@ -118,14 +137,33 @@ impl Indexer {
                         ),
                     });
                 }
-                for ((sym, vec), (_, hash)) in
-                    sym_chunk.iter().zip(vecs.iter()).zip(prep_chunk.iter())
-                {
+                all_vecs.extend(vecs);
+            }
+            debug_assert_eq!(all_vecs.len(), prepared.len());
+
+            for ((sym, (_, new_hash)), vec) in extraction
+                .symbols
+                .iter()
+                .zip(prepared.iter())
+                .zip(all_vecs.iter())
+            {
+                let stale = stored_source_hashes
+                    .get(sym.qualified_name.as_str())
+                    .is_some_and(|src| src.as_str() != new_hash.as_str());
+                if stale {
+                    self.graph
+                        .clear_symbol_description_and_reembed(
+                            sym.qualified_name.as_str(),
+                            new_hash,
+                            vec,
+                        )
+                        .await?;
+                } else {
                     self.graph
                         .set_symbol_embedding_and_body_hash(
                             sym.qualified_name.as_str(),
                             vec,
-                            hash.as_str(),
+                            new_hash,
                         )
                         .await?;
                 }

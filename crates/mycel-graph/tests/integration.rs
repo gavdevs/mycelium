@@ -625,3 +625,128 @@ async fn clear_all_descriptions_wipes_all_description_state() {
     assert_eq!(info.description, None);
     assert_eq!(info.description_source_hash, None);
 }
+
+#[tokio::test]
+async fn incremental_index_clears_stale_description() {
+    let client = fresh_client("mycel:test:stale_clear").await;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl mycel_models::Embedder for StubEmbedder {
+        fn identity(&self) -> &str {
+            "stub/test"
+        }
+        fn dimension(&self) -> u32 {
+            768
+        }
+        async fn embed(&self, texts: &[&str]) -> mycel_core::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.1; 768]).collect())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("staleable.rs");
+    let v1 = "fn staleable() { 1 }\n";
+    std::fs::write(&f, v1).unwrap();
+    let f_utf8 = camino::Utf8PathBuf::from_path_buf(f.clone()).unwrap();
+
+    let indexer = mycel_index::Indexer {
+        graph: client.clone(),
+        lsp: None,
+        embedder: std::sync::Arc::new(StubEmbedder),
+    };
+    indexer.index_file(&f_utf8, v1).await.unwrap();
+
+    let definers = client.query_definers("staleable").await.unwrap();
+    let qname_v1 = definers.first().expect("indexed").qualified_name.clone();
+
+    client
+        .set_symbol_description_and_embedding(qname_v1.as_str(), "Returns 1.", &vec![0.5; 768])
+        .await
+        .unwrap();
+
+    let v2 = "fn staleable() {\n  let x = 99;\n  x * 2\n}\n";
+    std::fs::write(&f, v2).unwrap();
+    indexer.index_file(&f_utf8, v2).await.unwrap();
+
+    let definers_after = client.query_definers("staleable").await.unwrap();
+    let qname_v2 = &definers_after.first().expect("indexed v2").qualified_name;
+    assert_eq!(qname_v2, &qname_v1, "qname stable across reindex");
+
+    let info = client
+        .get_symbol_description(qname_v1.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info.description, None,
+        "description must be cleared when body_hash diverges from description_source_hash"
+    );
+    assert_eq!(info.description_source_hash, None);
+    assert!(info.body_hash.is_some(), "fresh body_hash written");
+}
+
+#[tokio::test]
+async fn incremental_index_preserves_description_when_body_slice_unchanged() {
+    let client = fresh_client("mycel:test:preserve").await;
+
+    struct StubEmbedder;
+    #[async_trait::async_trait]
+    impl mycel_models::Embedder for StubEmbedder {
+        fn identity(&self) -> &str {
+            "stub/test"
+        }
+        fn dimension(&self) -> u32 {
+            768
+        }
+        async fn embed(&self, texts: &[&str]) -> mycel_core::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.1; 768]).collect())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("stable.rs");
+    let v1 = "fn stable() {\n    7\n}\n";
+    std::fs::write(&f, v1).unwrap();
+    let f_utf8 = camino::Utf8PathBuf::from_path_buf(f.clone()).unwrap();
+
+    let indexer = mycel_index::Indexer {
+        graph: client.clone(),
+        lsp: None,
+        embedder: std::sync::Arc::new(StubEmbedder),
+    };
+    indexer.index_file(&f_utf8, v1).await.unwrap();
+
+    let definers = client.query_definers("stable").await.unwrap();
+    let qname_v1 = definers.first().expect("indexed").qualified_name.clone();
+    client
+        .set_symbol_description_and_embedding(qname_v1.as_str(), "Returns 7.", &vec![0.5; 768])
+        .await
+        .unwrap();
+
+    // v2: identical function body, but a comment line is appended below.
+    // content_hash changes (so dedup does NOT skip), but the function's
+    // signature+body slice is byte-identical, so body_hash is unchanged.
+    let v2 = "fn stable() {\n    7\n}\n// added trailing comment\n";
+    std::fs::write(&f, v2).unwrap();
+    indexer.index_file(&f_utf8, v2).await.unwrap();
+
+    let definers_after = client.query_definers("stable").await.unwrap();
+    let qname_v2 = &definers_after.first().expect("indexed v2").qualified_name;
+    assert_eq!(qname_v2, &qname_v1, "qname stable across reindex");
+
+    let info = client
+        .get_symbol_description(qname_v1.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info.description.as_deref(),
+        Some("Returns 7."),
+        "description preserved when body slice unchanged"
+    );
+    assert!(
+        info.description_source_hash.is_some(),
+        "source_hash preserved (still matches body_hash)"
+    );
+}
