@@ -136,6 +136,8 @@ fn extract_rust(
                 synthesized_description: None,
                 exported: visible,
                 embedding: None,
+                body_hash: None,
+                description_source_hash: None,
             });
         }
     }

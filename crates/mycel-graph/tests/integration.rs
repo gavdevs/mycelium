@@ -41,6 +41,8 @@ async fn symbol_upsert_and_read() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     client.upsert_symbol(&sym).await.unwrap();
     // Round-trip via a Tier 1-style read
@@ -67,6 +69,8 @@ async fn edge_upsert_callers_query() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     let bar = Symbol {
         qualified_name: QualifiedName::new("crate::bar"),
@@ -79,6 +83,8 @@ async fn edge_upsert_callers_query() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     client.upsert_symbol(&foo).await.unwrap();
     client.upsert_symbol(&bar).await.unwrap();
@@ -114,6 +120,8 @@ async fn imports_uses_implements_queries() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     let i = Symbol {
         qualified_name: QualifiedName::new("ts::IFoo"),
@@ -126,6 +134,8 @@ async fn imports_uses_implements_queries() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     client.upsert_symbol(&foo).await.unwrap();
     client.upsert_symbol(&i).await.unwrap();

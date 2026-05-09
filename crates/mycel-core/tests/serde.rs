@@ -13,6 +13,8 @@ fn symbol_round_trip_json() {
         synthesized_description: None,
         exported: true,
         embedding: None,
+        body_hash: None,
+        description_source_hash: None,
     };
     let json = serde_json::to_string(&sym).unwrap();
     let back: Symbol = serde_json::from_str(&json).unwrap();

@@ -63,4 +63,59 @@ pub struct Symbol {
     pub exported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    /// blake3 hex of the `signature + body slice` text used for the current
+    /// embedding. Set on every cold-index/incremental pass. NULL only on
+    /// legacy graphs predating the 2026-05-05 redirection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hash: Option<String>,
+    /// The `body_hash` value at the time `synthesized_description` was last
+    /// written. NULL until a description is written. Compared against
+    /// `body_hash` on incremental updates to detect description staleness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_source_hash: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_serializes_with_new_fields() {
+        let sym = Symbol {
+            qualified_name: QualifiedName::new("a::b"),
+            kind: SymbolKind::Function,
+            file_path: "src/a.rs".into(),
+            start_line: 1,
+            end_line: 3,
+            signature: Signature::new("fn b()"),
+            jsdoc: None,
+            synthesized_description: None,
+            exported: true,
+            embedding: None,
+            body_hash: Some("deadbeef".into()),
+            description_source_hash: Some("cafebabe".into()),
+        };
+        let json = serde_json::to_string(&sym).unwrap();
+        assert!(json.contains("body_hash"));
+        assert!(json.contains("description_source_hash"));
+        let round: Symbol = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.body_hash.as_deref(), Some("deadbeef"));
+        assert_eq!(round.description_source_hash.as_deref(), Some("cafebabe"));
+    }
+
+    #[test]
+    fn symbol_deserializes_legacy_shape_without_new_fields() {
+        let legacy = r#"{
+            "qualified_name": "a::b",
+            "kind": "function",
+            "file_path": "src/a.rs",
+            "start_line": 1,
+            "end_line": 3,
+            "signature": "fn b()",
+            "exported": true
+        }"#;
+        let s: Symbol = serde_json::from_str(legacy).unwrap();
+        assert!(s.body_hash.is_none());
+        assert!(s.description_source_hash.is_none());
+    }
 }
