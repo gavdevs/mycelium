@@ -107,6 +107,34 @@ async fn main() -> anyhow::Result<()> {
             let r = mycel_query::find(&g, embedder.as_ref(), &query, limit).await?;
             output::print_find(&r, json);
         }
+        Cmd::SetDescription { qname, description } => {
+            let g = open(&cfg, &cli.repo).await?;
+            // Verify the qname resolves before paying for an embedding.
+            if g.get_symbol_description(&qname).await?.is_none() {
+                anyhow::bail!(
+                    "no Symbol with qualified_name '{qname}' — run `mycel definers <name>` to find the canonical qname"
+                );
+            }
+            let embedder = config::embedder_from_cfg(&cfg);
+            let mut vecs = embedder
+                .embed(&[description.as_str()])
+                .await
+                .context("embed description")?;
+            let vec = vecs
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("embedder returned no vectors"))?;
+            g.set_symbol_description_and_embedding(&qname, &description, &vec)
+                .await
+                .context("write description + embedding")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"qualified_name": qname, "ok": true})
+                );
+            } else {
+                println!("ok");
+            }
+        }
         Cmd::Describe { qname } => {
             let g = open(&cfg, &cli.repo).await?;
             let info = g

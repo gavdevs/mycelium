@@ -49,6 +49,19 @@ pub enum Cmd {
     /// Print the current synthesized description for a Symbol, or "(none)".
     /// With --json, emits {qualified_name, description, body_hash, description_source_hash}.
     Describe { qname: String },
+    /// Write a behavioral description for a Symbol. Embeds the description
+    /// text and atomically updates the Symbol's description + embedding +
+    /// description_source_hash. Used by the mycel-graph-care skill to record
+    /// understanding gained while reading code.
+    SetDescription {
+        /// The Symbol's qualified_name. Get this from
+        /// `mycel definers <name> --json`.
+        #[arg(long)]
+        qname: String,
+        /// 1-3 sentence behavioral description.
+        #[arg(long)]
+        description: String,
+    },
     Daemon { #[command(subcommand)] action: DaemonAction },
 }
 

@@ -124,3 +124,25 @@ async fn describe_json_includes_hashes() {
     assert!(stdout.contains("\"description_source_hash\""));
     assert!(stdout.contains("Json description."));
 }
+
+#[tokio::test]
+async fn set_description_unknown_qname_exits_nonzero_with_helpful_error() {
+    let graph_name = "mycel:cli_test:set_desc_unknown";
+    let _ = fresh_client(graph_name).await;
+
+    Command::cargo_bin("mycel")
+        .unwrap()
+        .env("MYCEL_TEST_GRAPH", graph_name)
+        .env("MYCEL_FALKORDB_URL", url())
+        .args([
+            "set-description",
+            "--qname",
+            "crate::not::a::real::symbol",
+            "--description",
+            "Whatever.",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("no Symbol"))
+        .stderr(contains("definers")); // hint Claude at the recovery path
+}
