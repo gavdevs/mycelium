@@ -22,9 +22,14 @@ async fn main() -> anyhow::Result<()> {
     let json = cli.json;
 
     match cli.command {
-        Cmd::Index { path, no_descriptions } => {
-            let graph_name = format!("mycel:{}", repo_id_from_path(&path));
+        Cmd::Index { path, force_cold_rebuild } => {
+            let graph_name = std::env::var("MYCEL_TEST_GRAPH")
+                .unwrap_or_else(|_| format!("mycel:{}", repo_id_from_path(&path)));
             let g = GraphClient::connect(&cfg.storage.falkordb_url, &graph_name).await?;
+            if force_cold_rebuild {
+                let n = g.clear_all_descriptions().await?;
+                println!("cleared {n} description(s) before re-index");
+            }
             let embedder = config::embedder_from_cfg(&cfg);
             // LSP refinement runs even from `mycel index` so Tier 1 queries
             // return correct results (CALLS edges with `source: lsp` are the
@@ -48,7 +53,6 @@ async fn main() -> anyhow::Result<()> {
                     None
                 }
             };
-            let _ = no_descriptions; // flag kept for transition; removed in a later task
             let indexer = Indexer { graph: g, lsp, embedder };
             let n = indexer.index_repo(&path).await?;
             println!("indexed {n} files");

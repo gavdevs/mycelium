@@ -395,6 +395,27 @@ impl GraphClient {
         }))
     }
 
+    /// Wipes synthesized_description and description_source_hash on every
+    /// Symbol in the graph. Embeddings are NOT cleared — the next index
+    /// pass will overwrite them with fresh signature+body embeddings via
+    /// `set_symbol_embedding_and_body_hash`. Returns the number of rows
+    /// affected.
+    pub async fn clear_all_descriptions(&self) -> Result<usize> {
+        let cypher = "MATCH (s:Symbol) WHERE coalesce(s.synthesized_description, '') <> '' \
+             SET s.synthesized_description = NULL, s.description_source_hash = NULL \
+             RETURN count(s) AS cleared";
+        let rows = self.query(cypher).await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::I64(n) => Some(n as usize),
+                _ => None,
+            })
+            .unwrap_or(0))
+    }
+
     /// Returns Symbols whose `description_source_hash` no longer matches
     /// `body_hash`. These are descriptions written against a body that has
     /// since been edited — stale by definition.

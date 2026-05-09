@@ -18,11 +18,11 @@ pub struct Cli {
 pub enum Cmd {
     Index {
         path: Utf8PathBuf,
-        /// Skip the Phase 2 description-synthesis pass at the end of indexing.
-        /// Use this for fast cold first-indexes where signature embeddings are
-        /// good enough; you can run `mycel synthesize` later to upgrade.
+        /// Wipe all existing descriptions before indexing — useful when
+        /// abandoning eager-synth descriptions in favor of workload-driven
+        /// fill via the mycel-graph-care skill.
         #[arg(long)]
-        no_descriptions: bool,
+        force_cold_rebuild: bool,
     },
     Callers { symbol: String },
     Callees { symbol: String },

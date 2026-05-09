@@ -589,3 +589,39 @@ async fn cold_index_writes_embedding_and_body_hash() {
         assert_eq!(body_hash.len(), 64, "blake3 hex");
     }
 }
+
+#[tokio::test]
+async fn clear_all_descriptions_wipes_all_description_state() {
+    let client = fresh_client("mycel:test:clear_all").await;
+
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::with_desc"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn with_desc()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("h1".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+    client
+        .set_symbol_description_and_embedding("crate::with_desc", "Has desc.", &vec![0.1; 768])
+        .await
+        .unwrap();
+
+    let n = client.clear_all_descriptions().await.unwrap();
+    assert!(n >= 1);
+
+    let info = client
+        .get_symbol_description("crate::with_desc")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.description, None);
+    assert_eq!(info.description_source_hash, None);
+}
