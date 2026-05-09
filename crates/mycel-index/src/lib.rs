@@ -4,6 +4,7 @@
 //! graph upsert (mycel-graph) → embed signatures (mycel-models) → File
 //! record write. Content-hash dedup short-circuits unchanged files.
 
+pub mod body_slice;
 pub mod dedup;
 pub mod pipeline;
 pub mod synthesize;
