@@ -750,3 +750,86 @@ async fn incremental_index_preserves_description_when_body_slice_unchanged() {
         "source_hash preserved (still matches body_hash)"
     );
 }
+
+#[tokio::test]
+async fn set_description_round_trips_newlines_and_quotes() {
+    // Regression: descriptions are user-/Claude-supplied text. Newlines and
+    // single quotes inside the description must not corrupt Cypher parsing
+    // or change the stored value.
+    let client = fresh_client("mycel:test:desc_quote_newline").await;
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::tricky"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn tricky()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("h".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+
+    let payload = "Line one with 'quotes'.\nLine two\twith tab.\nLine three.";
+    client
+        .set_symbol_description_and_embedding("crate::tricky", payload, &vec![0.1; 768])
+        .await
+        .unwrap();
+
+    let info = client
+        .get_symbol_description("crate::tricky")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.description.as_deref(), Some(payload));
+}
+
+#[tokio::test]
+async fn upsert_symbol_preserves_description_source_hash_on_none() {
+    // Sibling invariant to upsert_symbol_writes_body_hash_when_set: an
+    // extractor-shaped upsert (no description_source_hash on the input)
+    // must NOT clobber a value the description-write path stamped on a
+    // prior pass. The pipeline depends on this for the staleness pre-pass
+    // to observe the prior source_hash.
+    let client = fresh_client("mycel:test:source_hash_preserve").await;
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::preserve_src"),
+        kind: SymbolKind::Function,
+        file_path: "x.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn preserve_src()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("body-1".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+    client
+        .set_symbol_description_and_embedding(
+            "crate::preserve_src",
+            "Stamped.",
+            &vec![0.1; 768],
+        )
+        .await
+        .unwrap();
+
+    // Re-upsert the extractor-shape Symbol (description_source_hash: None).
+    client.upsert_symbol(&sym).await.unwrap();
+
+    let info = client
+        .get_symbol_description("crate::preserve_src")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        info.description_source_hash.as_deref(),
+        Some("body-1"),
+        "upsert with None source_hash must preserve prior stamped value"
+    );
+}
