@@ -78,12 +78,19 @@ mod tests {
     use super::*;
 
     fn tmp() -> Utf8PathBuf {
+        // Combine nanosecond timestamp + pid + a per-call atomic counter so
+        // parallel test runs cannot collide on the same temp dir even when
+        // they sample the clock within the same nanosecond.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "mycel-skill-test-{}",
+            "mycel-skill-test-{}-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir_all(&p).unwrap();
         Utf8PathBuf::from_path_buf(p).unwrap()
