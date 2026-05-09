@@ -167,3 +167,56 @@ async fn manifest_round_trip() {
     assert_eq!(read.embedder_identity, m.embedder_identity);
     assert_eq!(read.embedder_dimension, 768);
 }
+
+#[tokio::test]
+async fn upsert_symbol_writes_body_hash_when_set() {
+    let client = GraphClient::connect(&url(), "mycel:test:body_hash").await.unwrap();
+    let mut sym = Symbol {
+        qualified_name: QualifiedName::new("crate::tests::with_hash"),
+        kind: SymbolKind::Function,
+        file_path: "src/lib.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn with_hash()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("abc123".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+
+    let rows = client
+        .query(
+            "MATCH (s:Symbol {qualified_name: 'crate::tests::with_hash'}) \
+             RETURN s.body_hash",
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let value = rows[0].first().unwrap();
+    match value {
+        falkordb::FalkorValue::String(s) => assert_eq!(s, "abc123"),
+        other => panic!("expected String, got {other:?}"),
+    }
+
+    // Setting body_hash to None should NOT clobber the stored value on a
+    // subsequent upsert (extractor doesn't compute hashes; pipeline does).
+    sym.body_hash = None;
+    client.upsert_symbol(&sym).await.unwrap();
+    let rows = client
+        .query(
+            "MATCH (s:Symbol {qualified_name: 'crate::tests::with_hash'}) \
+             RETURN s.body_hash",
+        )
+        .await
+        .unwrap();
+    match &rows[0][0] {
+        falkordb::FalkorValue::String(s) => assert_eq!(
+            s, "abc123",
+            "None body_hash on upsert must not clobber existing value"
+        ),
+        other => panic!("expected String, got {other:?}"),
+    }
+}

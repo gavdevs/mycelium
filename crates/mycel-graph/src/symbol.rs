@@ -148,6 +148,13 @@ impl GraphClient {
     pub async fn upsert_symbol(&self, sym: &Symbol) -> Result<()> {
         let kind = serde_json::to_value(sym.kind).expect("SymbolKind serializes infallibly");
         let kind_str = kind.as_str().expect("SymbolKind serializes as JSON string");
+        // body_hash is computed by the indexing pipeline, not by the extractor;
+        // an upsert from extracted-Symbol-only paths leaves it None and we must
+        // NOT clobber a hash a previous pipeline pass already wrote.
+        let body_hash_clause = match &sym.body_hash {
+            Some(h) => format!(", s.body_hash = '{}'", escape(h)),
+            None => String::new(),
+        };
         let cypher = format!(
             r#"MERGE (s:Symbol {{qualified_name: '{qname}'}})
             SET s.kind = '{kind}',
@@ -156,7 +163,7 @@ impl GraphClient {
                 s.end_line = {end},
                 s.signature = '{sig}',
                 s.exported = {exported},
-                s.name = '{name}'"#,
+                s.name = '{name}'{body_hash_clause}"#,
             qname = escape(sym.qualified_name.as_str()),
             kind = kind_str,
             file = escape(sym.file_path.as_str()),
