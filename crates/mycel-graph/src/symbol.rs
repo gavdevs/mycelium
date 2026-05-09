@@ -395,6 +395,39 @@ impl GraphClient {
         }))
     }
 
+    /// Clears `synthesized_description` and `description_source_hash`, replaces
+    /// `embedding` with the fresh signature+body embedding, and updates
+    /// `body_hash` — all atomically. Used by the daemon's incremental path
+    /// when a Symbol's body has changed since its description was written.
+    ///
+    /// We do NOT preserve the old description. A description written against
+    /// a function body that no longer exists is worse than no description at
+    /// all — `find` clusters around behavior that's been removed/refactored.
+    pub async fn clear_symbol_description_and_reembed(
+        &self,
+        qname: &str,
+        new_body_hash: &str,
+        new_embedding: &[f32],
+    ) -> Result<()> {
+        let vec_lit = new_embedding
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let cypher = format!(
+            "MATCH (s:Symbol {{qualified_name: '{q}'}}) \
+             SET s.synthesized_description = NULL, \
+                 s.description_source_hash = NULL, \
+                 s.body_hash = '{h}', \
+                 s.embedding = vecf32([{v}])",
+            q = escape(qname),
+            h = escape(new_body_hash),
+            v = vec_lit,
+        );
+        self.query(&cypher).await?;
+        Ok(())
+    }
+
     /// Single-round-trip read of `description_source_hash` for a list of
     /// qualified names. Symbols with no description (or whose source_hash
     /// is unset) are absent from the returned map. Used by the daemon's

@@ -379,3 +379,42 @@ async fn description_source_hashes_for_batch_empty_input_returns_empty() {
     let map = client.description_source_hashes_for_batch(&[]).await.unwrap();
     assert!(map.is_empty());
 }
+
+#[tokio::test]
+async fn clear_description_and_reembed_resets_atomic() {
+    let client = GraphClient::connect(&url(), "mycel:test:clear").await.unwrap();
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("crate::clearer"),
+        kind: SymbolKind::Function,
+        file_path: "src/lib.rs".into(),
+        start_line: 1,
+        end_line: 2,
+        signature: Signature::new("fn clearer()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: Some("body-v1".into()),
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+    client
+        .set_symbol_description_and_embedding("crate::clearer", "Clears state.", &vec![0.5f32; 768])
+        .await
+        .unwrap();
+
+    let new_vec = vec![0.9f32; 768];
+    client
+        .clear_symbol_description_and_reembed("crate::clearer", "body-v2", &new_vec)
+        .await
+        .unwrap();
+
+    let info = client
+        .get_symbol_description("crate::clearer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.description, None);
+    assert_eq!(info.description_source_hash, None);
+    assert_eq!(info.body_hash.as_deref(), Some("body-v2"));
+}
