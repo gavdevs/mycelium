@@ -210,7 +210,13 @@ Five phases, each producing a usable artifact.
 
 > *Why "workload-driven" instead of eager.* The originally-shipped Phase 2 (2026-05-04) ran the Synthesizer over every Symbol at index time. Dogfood result: 30 minutes to index this workspace, projecting to multiple days for a typical 50k-symbol work codebase. The behavioral-search thesis was right; the trigger was wrong. Synthesizing every symbol pre-pays for retrievals nobody will ever issue. The 2026-05-05 redirection moves synthesis to "where Claude is already working, paid for by the session that's already running" — see `docs/superpowers/specs/2026-05-05-workload-driven-synthesis-design.md` for the full rationale and design.
 
-**Phase 3 — graph-augmented retrieval and reranking.** `Reranker` trait wired (qwen3-reranker:0.6b/4b default), full Tier 4 pipeline (vector search → graph expand → rerank → top-K). Build the reranker eval harness on real Mycelium-shape queries to settle the "which reranker" question empirically; promote winner to default if different from current.
+**Phase 3 — graph-augmented retrieval, reranking, and the cross-file edge unblock.** Five workstreams (see `docs/superpowers/specs/2026-05-10-phase-3-reranking-and-tier-4-design.md`):
+
+1. *Cross-file edge resolution* — rewrite the multilspy bridge's reference path so call sites resolve to Symbol qnames (not file URIs); CALLS / USES_TYPE / IMPLEMENTS edges finally land cross-file. Prerequisite for graph expansion.
+2. *Reranker integration* — `OllamaReranker::rerank` implemented against qwen3-reranker (yes/no-token scoring via Ollama `/api/generate` with logits), per-tier defaults (`0.6b` minimal/balanced, `4b` max), graceful cosine-fallback on failure.
+3. *Full Tier 4 pipeline* — new `find_tier4`: vector top-50 → 1-hop graph expand on CALLS/USES_TYPE/IMPLEMENTS → cap ~200 → rerank → top-10. Phase 1's vector-only `find` stays as `--no-rerank`.
+4. *Query-time on-demand synthesis* — when cosine scores are low and flat, synthesize behavioral descriptions for borderline candidates inline, re-embed, re-rank, persist back to the graph. Workload-driven Phase 2 applied to retrieval.
+5. *Reranker eval harness* — ~30 hand-curated behavioral queries against this repo with ground-truth qnames; nDCG@10 / MRR / hit-rate@5 per reranker; promotes winner to default if it beats the current default without regressing latency past 500ms p50.
 
 **Phase 4 — git-derived edges and Tier 3 queries.** Co-change analysis, test reachability, `mycel similar` / `mycel canonical` / `mycel recent`. Personalization layer's task knowledge bootstrap also lives here — query/result logging starts here, retrieval-quality traces accumulate.
 
@@ -224,7 +230,7 @@ Things deliberately deferred:
 
 - **Cross-language graph edges.** What does it mean for a TypeScript file to call a C# endpoint? Out of scope for v1.
 - **Multi-language description synthesis.** Phase 2's synthesizer is assumed to handle whatever language we throw at it. Reasonable for TS/JS; needs validation for other languages when we add them.
-- **Reranker pick.** Default is `qwen3-reranker:0.6b/4b` (Ollama-native, well-benchmarked). Phase 3 builds an empirical eval harness on real Mycelium-shape queries; candidates include `gte-reranker-modernbert-base`, `mxbai-rerank-v2`, and `jina-reranker-v2` (all sidecar-only on Ollama today). Default may move based on results.
+- **Reranker pick.** Default is `qwen3-reranker:0.6b/4b` (Ollama-native, well-benchmarked). Phase 3's eval harness (`crates/mycel-query/eval/`) sweeps Ollama-native candidates by default and sidecar candidates (`gte-reranker-modernbert-base`, `mxbai-rerank-v2`, `jina-reranker-v2`) under `--with-sidecar-rerankers`. Default may move based on results, weighted against the operational cost of running a sidecar.
 - **Reranker fine-tuning.** Whether a small fine-tune on accumulated retrieval-quality traces would meaningfully improve quality is an open empirical question, separate from picking the off-the-shelf default.
 - **MCP frontend.** A wrapper that exposes Mycelium's CLI as MCP tools is a reasonable addition for users on tools other than Claude Code (Cursor, Codex, Aider). Skill+CLI is the v1 default; MCP is a thin shim we can add later without changing the backend.
 - **Multi-tenant deployments.** Mycelium is single-user for v1. Sharing an index across a team would require auth, access control, and a different storage tenancy model — all real work, all out of scope.
