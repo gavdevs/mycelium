@@ -165,7 +165,6 @@ impl Synthesizer for OllamaSynthesizer {
 /// caller can treat them as "no opinion" rather than "definite no". Case- and
 /// whitespace-insensitive; only the first lexeme matters because we set
 /// `temperature: 0.0` and expect a single-token answer.
-#[allow(dead_code)] // wired into OllamaReranker::rerank in a follow-up task
 fn parse_rerank_response(raw: &str) -> f32 {
     let head = raw.split_whitespace().next().unwrap_or("");
     let head = head.trim_end_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
@@ -177,17 +176,105 @@ fn parse_rerank_response(raw: &str) -> f32 {
 }
 
 pub struct OllamaReranker {
-    pub endpoint: String,
-    pub model: String,
+    endpoint: String,
+    model: String,
+    identity: String,
+    client: reqwest::Client,
+    concurrency: usize,
 }
+
+impl OllamaReranker {
+    /// `concurrency` is the max in-flight rerank requests; tune to match
+    /// Ollama's `num_parallel` (default 4; raise to 8 on Max tier).
+    pub fn new(endpoint: impl Into<String>, model: impl Into<String>, concurrency: usize) -> Self {
+        let model = model.into();
+        let identity = format!("ollama/{model}");
+        Self {
+            endpoint: endpoint.into(),
+            model,
+            identity,
+            // 5s per call. The Tier-4 pipeline applies its own outer budget;
+            // individual stragglers shouldn't drag the whole rerank batch.
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .expect("reqwest client builds with default tls"),
+            concurrency: concurrency.max(1),
+        }
+    }
+}
+
 #[async_trait]
 impl Reranker for OllamaReranker {
     fn identity(&self) -> &str {
-        &self.model
+        &self.identity
     }
-    async fn rerank(&self, _query: &str, _candidates: &[&str]) -> Result<Vec<f32>> {
-        todo!("phase 3 — wire reranker endpoint")
+    async fn rerank(&self, query: &str, candidates: &[&str]) -> Result<Vec<f32>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        use futures::stream::{self, StreamExt};
+        // Build prompts up front so the async closures don't need to borrow
+        // `candidates` across awaits — sidesteps a higher-ranked-lifetime
+        // mismatch that bites when using `&[&str]` inside `buffer_unordered`.
+        let prompts: Vec<(usize, String)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, cand)| (i, build_rerank_prompt(query, cand)))
+            .collect();
+        let scored = stream::iter(prompts)
+            .map(|(i, prompt)| {
+                let url = format!("{}/api/generate", self.endpoint);
+                let client = self.client.clone();
+                let model = self.model.clone();
+                let identity = self.identity.clone();
+                async move {
+                    let body = serde_json::json!({
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": false,
+                        "options": {"temperature": 0.0}
+                    });
+                    let resp_result = client.post(&url).json(&body).send().await;
+                    match resp_result.and_then(|r| r.error_for_status()) {
+                        Ok(resp) => match resp.json::<GenerateResponse>().await {
+                            Ok(parsed) => (i, parse_rerank_response(&parsed.response)),
+                            Err(e) => {
+                                tracing::warn!(provider = %identity, error = %e, "rerank: bad JSON, scoring as -inf");
+                                (i, f32::NEG_INFINITY)
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(provider = %identity, error = %e, "rerank: request failed, scoring as -inf");
+                            (i, f32::NEG_INFINITY)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(self.concurrency)
+            .collect::<Vec<_>>()
+            .await;
+        let mut out = vec![f32::NEG_INFINITY; candidates.len()];
+        for (i, score) in scored {
+            out[i] = score;
+        }
+        // If every candidate returned -inf, the reranker is effectively dead;
+        // surface that loudly so Tier-4 can fall through to cosine ordering.
+        if out.iter().all(|s| s.is_infinite()) {
+            return Err(MycelError::Model {
+                provider: self.identity.clone(),
+                message: "rerank: every candidate failed; reranker is unhealthy".into(),
+            });
+        }
+        Ok(out)
     }
+}
+
+fn build_rerank_prompt(query: &str, doc: &str) -> String {
+    // Trim docs to ~1500 chars to keep prompt sizes manageable; the reranker
+    // doesn't need the whole body, just enough to judge relevance.
+    let doc_trunc: String = doc.chars().take(1500).collect();
+    format!("Query: {query}\nDocument: {doc_trunc}\nRelevant (yes/no):")
 }
 
 #[cfg(test)]
@@ -214,5 +301,20 @@ mod tests {
             assert!(parse_rerank_response(s).is_infinite() && parse_rerank_response(s).is_sign_negative(),
                 "expected -inf for {s:?}");
         }
+    }
+
+    #[test]
+    fn rerank_prompt_includes_query_and_document() {
+        let p = build_rerank_prompt("validate auth", "fn check_token() {}");
+        assert!(p.contains("Query: validate auth"));
+        assert!(p.contains("Document: fn check_token() {}"));
+        assert!(p.ends_with("Relevant (yes/no):"));
+    }
+
+    #[test]
+    fn rerank_prompt_truncates_long_docs() {
+        let long_doc = "x".repeat(5000);
+        let p = build_rerank_prompt("q", &long_doc);
+        assert!(p.len() <= 1600, "prompt was {} chars", p.len());
     }
 }
