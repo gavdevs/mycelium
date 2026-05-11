@@ -1,8 +1,7 @@
 //! mycel-models — Embedder/Synthesizer/Reranker trait surface and Ollama provider.
 //!
-//! Phase 1 ships only the Embedder implementation (OllamaEmbedder); Synthesizer
-//! and Reranker are stubbed so the trait surface is locked, but Phase 2/3 fill
-//! in the bodies.
+//! Phase 1 shipped Embedder + Synthesizer; Phase 3 fills in the Reranker
+//! (`OllamaReranker`) against the qwen3-reranker family.
 
 use async_trait::async_trait;
 use mycel_core::Result;
@@ -31,4 +30,4 @@ pub trait Reranker: Send + Sync {
 }
 
 pub mod ollama;
-pub use ollama::{OllamaEmbedder, OllamaSynthesizer};
+pub use ollama::{OllamaEmbedder, OllamaReranker, OllamaSynthesizer};
