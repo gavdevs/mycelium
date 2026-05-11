@@ -142,6 +142,40 @@ pub fn synthesizer_from_cfg(cfg: &Config) -> Option<std::sync::Arc<dyn mycel_mod
     }
 }
 
+/// Build a Reranker from config, falling back to the tier-default Ollama
+/// model when the user hasn't pinned one. Returns None only if the user
+/// explicitly sets `MYCEL_RERANKER=off` (escape hatch for Tier-4 testing
+/// without rerank cost — falls through to cosine-only ordering).
+///
+/// Not yet called from `main.rs`; Workstream C will wire it into the Tier-4
+/// query path. Keep `#[allow(dead_code)]` until that lands.
+#[allow(dead_code)]
+pub fn reranker_from_cfg(cfg: &Config) -> Option<std::sync::Arc<dyn mycel_models::Reranker>> {
+    if std::env::var("MYCEL_RERANKER").as_deref() == Ok("off") {
+        return None;
+    }
+    let provider = cfg
+        .providers
+        .reranker
+        .clone()
+        .unwrap_or_else(ProviderConfig::default_ollama);
+    let concurrency = match cfg.models.tier.unwrap_or_else(detect_tier) {
+        Tier::Minimal | Tier::Balanced => 4,
+        Tier::Max => 8,
+    };
+    match provider {
+        ProviderConfig::Ollama { endpoint, model, .. } => {
+            let model = std::env::var("MYCEL_RERANKER_MODEL")
+                .ok()
+                .or(model)
+                .unwrap_or_else(|| default_reranker_model(cfg.models.tier));
+            Some(std::sync::Arc::new(mycel_models::OllamaReranker::new(
+                endpoint, model, concurrency,
+            )))
+        }
+    }
+}
+
 /// Pick the default synthesizer model for a tier, mirroring DESIGN.md's
 /// tier table. If `tier` is None, auto-detect from system memory.
 fn default_synthesizer_model(tier: Option<Tier>) -> String {
@@ -150,6 +184,18 @@ fn default_synthesizer_model(tier: Option<Tier>) -> String {
         Tier::Minimal => "gemma4:e2b".into(),
         Tier::Balanced => "gemma4:e4b".into(),
         Tier::Max => "qwen3.6:35b-a3b".into(),
+    }
+}
+
+/// Pick the default reranker model for a tier, mirroring DESIGN.md's
+/// tier table. Minimal/Balanced share the small model; Max upgrades to 4b
+/// (the swap is free at query time — no reindex implications).
+#[allow(dead_code)]
+fn default_reranker_model(tier: Option<Tier>) -> String {
+    let tier = tier.unwrap_or_else(detect_tier);
+    match tier {
+        Tier::Minimal | Tier::Balanced => "qwen3-reranker:0.6b".into(),
+        Tier::Max => "qwen3-reranker:4b".into(),
     }
 }
 
@@ -177,4 +223,17 @@ fn detect_tier() -> Tier {
         }
     }
     Tier::Balanced
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mycel_core::Tier;
+
+    #[test]
+    fn reranker_default_per_tier() {
+        assert_eq!(default_reranker_model(Some(Tier::Minimal)), "qwen3-reranker:0.6b");
+        assert_eq!(default_reranker_model(Some(Tier::Balanced)), "qwen3-reranker:0.6b");
+        assert_eq!(default_reranker_model(Some(Tier::Max)), "qwen3-reranker:4b");
+    }
 }
