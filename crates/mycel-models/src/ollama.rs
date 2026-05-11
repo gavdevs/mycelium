@@ -159,6 +159,23 @@ impl Synthesizer for OllamaSynthesizer {
     }
 }
 
+/// Maps a qwen3-reranker-style yes/no completion to a 0/1 score.
+///
+/// Returns `f32::NEG_INFINITY` for responses we can't classify, so the Tier-4
+/// caller can treat them as "no opinion" rather than "definite no". Case- and
+/// whitespace-insensitive; only the first lexeme matters because we set
+/// `temperature: 0.0` and expect a single-token answer.
+#[allow(dead_code)] // wired into OllamaReranker::rerank in a follow-up task
+fn parse_rerank_response(raw: &str) -> f32 {
+    let head = raw.split_whitespace().next().unwrap_or("");
+    let head = head.trim_end_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase();
+    match head.as_str() {
+        "yes" => 1.0,
+        "no" => 0.0,
+        _ => f32::NEG_INFINITY,
+    }
+}
+
 pub struct OllamaReranker {
     pub endpoint: String,
     pub model: String,
@@ -170,5 +187,32 @@ impl Reranker for OllamaReranker {
     }
     async fn rerank(&self, _query: &str, _candidates: &[&str]) -> Result<Vec<f32>> {
         todo!("phase 3 — wire reranker endpoint")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_affirmative_responses_as_one() {
+        for s in ["yes", "Yes", "  yes  ", "yes.", "yes\n"] {
+            assert_eq!(parse_rerank_response(s), 1.0, "expected 1.0 for {s:?}");
+        }
+    }
+
+    #[test]
+    fn parses_negative_responses_as_zero() {
+        for s in ["no", "No", "  no  ", "no.", "no\n"] {
+            assert_eq!(parse_rerank_response(s), 0.0, "expected 0.0 for {s:?}");
+        }
+    }
+
+    #[test]
+    fn unparseable_responses_are_neg_infinity() {
+        for s in ["", "maybe", "definitely", "  "] {
+            assert!(parse_rerank_response(s).is_infinite() && parse_rerank_response(s).is_sign_negative(),
+                "expected -inf for {s:?}");
+        }
     }
 }
