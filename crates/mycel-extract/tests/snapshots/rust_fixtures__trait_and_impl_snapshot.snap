@@ -1,6 +1,5 @@
 ---
 source: crates/mycel-extract/tests/rust_fixtures.rs
-assertion_line: 26
 expression: "extract_fixture(\"trait_and_impl.rs\")"
 ---
 symbols:
@@ -37,4 +36,5 @@ edges:
     to: Greeter
     kind: implements
     source: tree_sitter
+    from_line: 9
 language: rust

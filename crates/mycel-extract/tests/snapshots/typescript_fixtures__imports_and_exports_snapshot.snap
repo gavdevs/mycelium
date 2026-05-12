@@ -1,6 +1,5 @@
 ---
 source: crates/mycel-extract/tests/typescript_fixtures.rs
-assertion_line: 31
 expression: "extract_fixture(\"imports_and_exports.ts\")"
 ---
 symbols:
@@ -16,6 +15,7 @@ edges:
     to: add
     kind: calls
     source: tree_sitter
+    from_line: 6
   - from: tests/fixtures/typescript/imports_and_exports.ts
     to: "./simple_function"
     kind: imports

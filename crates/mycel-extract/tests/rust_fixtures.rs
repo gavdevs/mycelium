@@ -25,3 +25,39 @@ fn simple_module_snapshot() {
 fn trait_and_impl_snapshot() {
     insta::assert_yaml_snapshot!(extract_fixture("trait_and_impl.rs"));
 }
+
+#[test]
+fn rust_call_edge_carries_from_line() {
+    let out = extract_fixture("simple_module.rs");
+    let call_edges: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| matches!(e.kind, mycel_core::EdgeKind::Calls))
+        .collect();
+    assert!(!call_edges.is_empty(), "fixture should produce >=1 CALL edge");
+    for e in &call_edges {
+        assert!(e.from_line.is_some(), "CALL edge {e:?} missing from_line");
+        assert!(e.from_line.unwrap() > 0, "from_line should be 1-indexed");
+    }
+}
+
+#[test]
+fn rust_implements_edge_carries_from_line() {
+    let out = extract_fixture("trait_and_impl.rs");
+    let impl_edges: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| matches!(e.kind, mycel_core::EdgeKind::Implements))
+        .collect();
+    assert!(
+        !impl_edges.is_empty(),
+        "fixture should produce >=1 IMPLEMENTS edge"
+    );
+    for e in &impl_edges {
+        assert!(
+            e.from_line.is_some(),
+            "IMPLEMENTS edge {e:?} missing from_line"
+        );
+        assert!(e.from_line.unwrap() > 0, "from_line should be 1-indexed");
+    }
+}

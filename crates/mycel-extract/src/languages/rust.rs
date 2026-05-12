@@ -151,21 +151,29 @@ fn extract_rust(
     let mut matches = cursor.matches(&q_impl, tree.root_node(), bytes);
     while let Some(m) = matches.next() {
         let mut trait_name: Option<&str> = None;
+        let mut trait_node: Option<Node> = None;
         let mut type_name: Option<&str> = None;
         for c in m.captures {
             match q_impl.capture_names()[c.index as usize] {
-                "trait" => trait_name = node_text(c.node, bytes),
+                "trait" => {
+                    trait_name = node_text(c.node, bytes);
+                    trait_node = Some(c.node);
+                }
                 "ty" => type_name = node_text(c.node, bytes),
                 _ => {}
             }
         }
-        if let (Some(trait_name), Some(type_name)) = (trait_name, type_name) {
+        if let (Some(trait_name), Some(trait_node), Some(type_name)) =
+            (trait_name, trait_node, type_name)
+        {
             edges.push(Edge {
                 from: format!("{}::{}", file.as_str(), type_name),
                 to: trait_name.into(),
                 kind: EdgeKind::Implements,
                 source: EdgeSource::TreeSitter,
-                from_line: None,
+                // 1-indexed row of the trait reference in the `impl Trait for Ty`
+                // header so LSP can resolve `trait_name` to its definition file.
+                from_line: Some(trait_node.start_position().row as u32 + 1),
             });
         }
     }
@@ -216,7 +224,9 @@ fn extract_rust(
                     to: callee.into(),
                     kind: EdgeKind::Calls,
                     source: EdgeSource::TreeSitter,
-                    from_line: None,
+                    // 1-indexed call-site row so LSP refinement can hover the
+                    // line to resolve `callee` across files.
+                    from_line: Some(c.node.start_position().row as u32 + 1),
                 });
             }
         }

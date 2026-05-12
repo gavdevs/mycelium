@@ -30,3 +30,18 @@ fn class_with_methods_snapshot() {
 fn imports_and_exports_snapshot() {
     insta::assert_yaml_snapshot!(extract_fixture("imports_and_exports.ts"));
 }
+
+#[test]
+fn typescript_call_edge_carries_from_line() {
+    let out = extract_fixture("imports_and_exports.ts");
+    let call_edges: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| matches!(e.kind, mycel_core::EdgeKind::Calls))
+        .collect();
+    assert!(!call_edges.is_empty(), "fixture should produce >=1 CALL edge");
+    for e in &call_edges {
+        assert!(e.from_line.is_some(), "CALL edge {e:?} missing from_line");
+        assert!(e.from_line.unwrap() > 0, "from_line should be 1-indexed");
+    }
+}
