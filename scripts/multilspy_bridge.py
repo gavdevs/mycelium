@@ -95,31 +95,35 @@ class BridgeState:
         edges = []
         partial = False
         try:
-            doc_symbols = server.request_document_symbols(path)
-            # Some multilspy versions return a tuple, others a list; normalize.
-            if isinstance(doc_symbols, tuple):
-                doc_symbols = doc_symbols[0]
-            for sym in (doc_symbols or []):
-                name = sym.get("name") if isinstance(sym, dict) else None
-                if not name:
-                    continue
-                start = _selection_start(sym)
-                if not start:
-                    continue
-                try:
-                    defs = server.request_definition(path, start["line"], start["character"])
-                    for d in (defs or []):
-                        target_uri = d.get("uri") or d.get("targetUri")
-                        if not target_uri:
-                            continue
-                        edges.append({
-                            "from": f"{path}::{name}",
-                            "to": target_uri,
-                            "kind": "references",
-                            "source": "lsp",
-                        })
-                except Exception:
-                    partial = True
+            # multilspy requires open_file before any request targeting that
+            # file's symbols — without it, request_definition returns only
+            # same-file hits.
+            with server.open_file(path):
+                doc_symbols = server.request_document_symbols(path)
+                # Some multilspy versions return a tuple, others a list; normalize.
+                if isinstance(doc_symbols, tuple):
+                    doc_symbols = doc_symbols[0]
+                for sym in (doc_symbols or []):
+                    name = sym.get("name") if isinstance(sym, dict) else None
+                    if not name:
+                        continue
+                    start = _selection_start(sym)
+                    if not start:
+                        continue
+                    try:
+                        defs = server.request_definition(path, start["line"], start["character"])
+                        for d in (defs or []):
+                            target_uri = d.get("uri") or d.get("targetUri")
+                            if not target_uri:
+                                continue
+                            edges.append({
+                                "from": f"{path}::{name}",
+                                "to": target_uri,
+                                "kind": "references",
+                                "source": "lsp",
+                            })
+                    except Exception:
+                        partial = True
         except Exception:
             partial = True
         return {"edges": edges, "partial": partial}
@@ -129,34 +133,44 @@ class BridgeState:
         server = self.get_server(repo_root, language)
         refs = []
         partial = False
-        for site in (sites or []):
-            try:
-                # tree-sitter sites are 1-indexed; LSP wants 0-indexed lines.
-                defs = server.request_definition(path, site["line"] - 1, site["col"])
-                for d in (defs or []):
-                    target_uri = d.get("uri") or d.get("targetUri")
-                    # `range` is plain Location; `targetSelectionRange` / `targetRange`
-                    # is the LocationLink form. Prefer the name range when available.
-                    target_range = (
-                        d.get("range")
-                        or d.get("targetSelectionRange")
-                        or d.get("targetRange")
-                    )
-                    if not target_uri or not target_range:
-                        continue
-                    to_path = _uri_to_repo_path(target_uri, repo_root)
-                    if to_path is None:
-                        continue  # definition lives outside the repo (stdlib, node_modules)
-                    to_line = target_range["start"]["line"] + 1  # back to 1-indexed
-                    refs.append({
-                        "from_path": path,
-                        "from_line": site["line"],
-                        "to_path": to_path,
-                        "to_line": to_line,
-                        "kind": site["kind"],
-                    })
-            except Exception:
-                partial = True
+        if not sites:
+            return {"refs": refs, "partial": partial}
+        # multilspy requires open_file before any request targeting that file's
+        # symbols — without it, request_definition returns only same-file hits.
+        try:
+            with server.open_file(path):
+                for site in sites:
+                    try:
+                        # tree-sitter sites are 1-indexed; LSP wants 0-indexed lines.
+                        defs = server.request_definition(path, site["line"] - 1, site["col"])
+                        for d in (defs or []):
+                            target_uri = d.get("uri") or d.get("targetUri")
+                            # `range` is plain Location; `targetSelectionRange` / `targetRange`
+                            # is the LocationLink form. Prefer the name range when available.
+                            target_range = (
+                                d.get("range")
+                                or d.get("targetSelectionRange")
+                                or d.get("targetRange")
+                            )
+                            if not target_uri or not target_range:
+                                continue
+                            to_path = _uri_to_repo_path(target_uri, repo_root)
+                            if to_path is None:
+                                continue  # definition lives outside the repo (stdlib, node_modules)
+                            to_line = target_range["start"]["line"] + 1  # back to 1-indexed
+                            refs.append({
+                                "from_path": path,
+                                "from_line": site["line"],
+                                "to_path": to_path,
+                                "to_line": to_line,
+                                "kind": site["kind"],
+                            })
+                    except Exception:
+                        partial = True
+        except Exception:
+            # If open_file itself fails (e.g., file not found from the LS's POV),
+            # mark partial and return what we have (empty).
+            partial = True
         return {"refs": refs, "partial": partial}
 
 def main():
