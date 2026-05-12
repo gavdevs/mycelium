@@ -25,6 +25,7 @@ use tracing::{debug, error, warn};
 pub struct MultilspyResolver {
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>>,
+    pending_resolve: Arc<Mutex<HashMap<u64, oneshot::Sender<ResolveRefsResp>>>>,
     stdin: Arc<Mutex<ChildStdin>>,
     repo_root: Utf8PathBuf,
     dead: Arc<AtomicBool>,
@@ -59,15 +60,23 @@ impl MultilspyResolver {
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>> =
             Default::default();
+        let pending_resolve: Arc<Mutex<HashMap<u64, oneshot::Sender<ResolveRefsResp>>>> =
+            Default::default();
         let dead = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(reader_loop(stdout, pending.clone()));
+        tokio::spawn(reader_loop(stdout, pending.clone(), pending_resolve.clone()));
         tokio::spawn(stderr_loop(stderr));
-        tokio::spawn(wait_loop(child, pending.clone(), dead.clone()));
+        tokio::spawn(wait_loop(
+            child,
+            pending.clone(),
+            pending_resolve.clone(),
+            dead.clone(),
+        ));
 
         Ok(Self {
             next_id: AtomicU64::new(1),
             pending,
+            pending_resolve,
             stdin: Arc::new(Mutex::new(stdin)),
             repo_root,
             dead,
@@ -78,14 +87,28 @@ impl MultilspyResolver {
 async fn reader_loop(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>>,
+    pending_resolve: Arc<Mutex<HashMap<u64, oneshot::Sender<ResolveRefsResp>>>>,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = reader.next_line().await {
         debug!(line = %line, "bridge response");
-        match serde_json::from_str::<EdgesForFileResp>(&line) {
+        // Demux: the bridge has two response shapes and neither carries an `op`
+        // discriminator. Route by id ownership — try edges first, then resolve.
+        // A response routes to whichever pending map currently holds its id.
+        // We parse twice in the worst case; JSON parse failures here are cheap.
+        if let Ok(resp) = serde_json::from_str::<EdgesForFileResp>(&line) {
+            if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                let _ = tx.send(resp);
+                continue;
+            }
+            // Fall through: id wasn't pending here; try the resolve map.
+        }
+        match serde_json::from_str::<ResolveRefsResp>(&line) {
             Ok(resp) => {
-                if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                if let Some(tx) = pending_resolve.lock().await.remove(&resp.id) {
                     let _ = tx.send(resp);
+                } else {
+                    warn!(line = %line, "bridge response id not pending in either map");
                 }
             }
             Err(e) => warn!(error = %e, line = %line, "could not parse bridge response"),
@@ -108,6 +131,7 @@ async fn stderr_loop(stderr: ChildStderr) {
 async fn wait_loop(
     mut child: tokio::process::Child,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<EdgesForFileResp>>>>,
+    pending_resolve: Arc<Mutex<HashMap<u64, oneshot::Sender<ResolveRefsResp>>>>,
     dead: Arc<AtomicBool>,
 ) {
     let status = child.wait().await;
@@ -117,14 +141,27 @@ async fn wait_loop(
         Err(e) => format!("bridge wait failed: {e}"),
     };
     error!("{msg}");
-    let mut pending = pending.lock().await;
-    for (_, tx) in pending.drain() {
-        let _ = tx.send(EdgesForFileResp {
-            id: 0,
-            edges: Vec::new(),
-            partial: false,
-            error: Some(msg.clone()),
-        });
+    {
+        let mut pending = pending.lock().await;
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(EdgesForFileResp {
+                id: 0,
+                edges: Vec::new(),
+                partial: false,
+                error: Some(msg.clone()),
+            });
+        }
+    }
+    {
+        let mut pending = pending_resolve.lock().await;
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(ResolveRefsResp {
+                id: 0,
+                refs: Vec::new(),
+                partial: false,
+                error: Some(msg.clone()),
+            });
+        }
     }
 }
 
@@ -191,5 +228,58 @@ impl MultilspyResolver {
                 })
             })
             .collect())
+    }
+
+    /// For each (line, col, kind) site, calls multilspy's `request_definition`
+    /// via the bridge and returns the resolved (from_path, from_line, to_path,
+    /// to_line, kind) tuples. `path` is repo-relative.
+    pub async fn resolve_refs(
+        &self,
+        path: &camino::Utf8Path,
+        language: &str,
+        sites: Vec<crate::protocol::RefSite>,
+    ) -> Result<Vec<crate::protocol::RawResolvedRef>> {
+        if self.dead.load(Ordering::Acquire) {
+            return Err(MycelError::Lsp(
+                "bridge died earlier; refusing further requests".into(),
+            ));
+        }
+        if sites.is_empty() {
+            return Ok(Vec::new());
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending_resolve.lock().await.insert(id, tx);
+        let req = crate::protocol::ResolveRefsReq {
+            id,
+            op: "resolve_refs_for_file",
+            repo_root: self.repo_root.as_str(),
+            language,
+            path: path.as_str(),
+            sites,
+        };
+        let line = serde_json::to_string(&req)? + "\n";
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(line.as_bytes())
+                .await
+                .map_err(|e| MycelError::Lsp(format!("write: {e}")))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| MycelError::Lsp(format!("flush: {e}")))?;
+        }
+        let resp = rx
+            .await
+            .map_err(|_| MycelError::Lsp("bridge closed".into()))?;
+        if let Some(err) = resp.error {
+            warn!(language, %path, "resolve_refs error: {err}");
+            return Ok(Vec::new());
+        }
+        if resp.partial {
+            warn!(language, %path, "resolve_refs returned partial results");
+        }
+        Ok(resp.refs)
     }
 }
