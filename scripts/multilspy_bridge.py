@@ -51,6 +51,18 @@ def _selection_start(sym):
     rng = loc.get("range") or {}
     return rng.get("start")
 
+def _uri_to_repo_path(uri: str, repo_root: str):
+    """Convert a file:// URI to a repo-relative path, or None if outside the repo."""
+    from urllib.parse import urlparse, unquote
+    p = urlparse(uri)
+    if p.scheme != "file":
+        return None
+    abs_path = unquote(p.path)
+    root = repo_root.rstrip("/")
+    if not abs_path.startswith(root + "/"):
+        return None
+    return abs_path[len(root) + 1:]
+
 class BridgeState:
     def __init__(self):
         self.servers = {}  # (repo_root, language) -> (server, cm)
@@ -112,6 +124,41 @@ class BridgeState:
             partial = True
         return {"edges": edges, "partial": partial}
 
+    def resolve_refs_for_file(self, repo_root: str, language: str, path: str, sites):
+        """Per-site request_definition; map each result back to (path, line)."""
+        server = self.get_server(repo_root, language)
+        refs = []
+        partial = False
+        for site in (sites or []):
+            try:
+                # tree-sitter sites are 1-indexed; LSP wants 0-indexed lines.
+                defs = server.request_definition(path, site["line"] - 1, site["col"])
+                for d in (defs or []):
+                    target_uri = d.get("uri") or d.get("targetUri")
+                    # `range` is plain Location; `targetSelectionRange` / `targetRange`
+                    # is the LocationLink form. Prefer the name range when available.
+                    target_range = (
+                        d.get("range")
+                        or d.get("targetSelectionRange")
+                        or d.get("targetRange")
+                    )
+                    if not target_uri or not target_range:
+                        continue
+                    to_path = _uri_to_repo_path(target_uri, repo_root)
+                    if to_path is None:
+                        continue  # definition lives outside the repo (stdlib, node_modules)
+                    to_line = target_range["start"]["line"] + 1  # back to 1-indexed
+                    refs.append({
+                        "from_path": path,
+                        "from_line": site["line"],
+                        "to_path": to_path,
+                        "to_line": to_line,
+                        "kind": site["kind"],
+                    })
+            except Exception:
+                partial = True
+        return {"refs": refs, "partial": partial}
+
 def main():
     state = BridgeState()
     for line in sys.stdin:
@@ -129,6 +176,11 @@ def main():
             if op == "edges_for_file":
                 result = state.edges_for_file(
                     req["repo_root"], req["language"], req["path"]
+                )
+                emit({"id": rid, **result})
+            elif op == "resolve_refs_for_file":
+                result = state.resolve_refs_for_file(
+                    req["repo_root"], req["language"], req["path"], req.get("sites", []),
                 )
                 emit({"id": rid, **result})
             elif op == "ping":
