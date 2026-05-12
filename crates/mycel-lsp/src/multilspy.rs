@@ -187,6 +187,7 @@ impl MultilspyResolver {
                     to: r.to,
                     kind,
                     source: EdgeSource::Lsp,
+                    from_line: None,
                 })
             })
             .collect())

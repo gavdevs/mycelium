@@ -205,6 +205,7 @@ fn extract_symbols_and_edges(
             to: callee_name.into(),
             kind: EdgeKind::Calls,
             source: EdgeSource::TreeSitter,
+            from_line: None,
         });
     }
 
@@ -229,6 +230,7 @@ fn extract_symbols_and_edges(
                     to: src_text.into(),
                     kind: EdgeKind::Imports,
                     source: EdgeSource::TreeSitter,
+                    from_line: None,
                 });
             }
         }

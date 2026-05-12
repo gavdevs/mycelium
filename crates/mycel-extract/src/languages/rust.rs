@@ -165,6 +165,7 @@ fn extract_rust(
                 to: trait_name.into(),
                 kind: EdgeKind::Implements,
                 source: EdgeSource::TreeSitter,
+                from_line: None,
             });
         }
     }
@@ -185,6 +186,7 @@ fn extract_rust(
                     to: path.into(),
                     kind: EdgeKind::Imports,
                     source: EdgeSource::TreeSitter,
+                    from_line: None,
                 });
             }
         }
@@ -214,6 +216,7 @@ fn extract_rust(
                     to: callee.into(),
                     kind: EdgeKind::Calls,
                     source: EdgeSource::TreeSitter,
+                    from_line: None,
                 });
             }
         }

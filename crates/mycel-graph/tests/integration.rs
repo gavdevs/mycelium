@@ -103,6 +103,7 @@ async fn edge_upsert_callers_query() {
             to: "crate::bar".into(),
             kind: EdgeKind::Calls,
             source: EdgeSource::Lsp,
+            from_line: None,
         }])
         .await
         .unwrap();
@@ -154,6 +155,7 @@ async fn imports_uses_implements_queries() {
             to: "ts::IFoo".into(),
             kind: EdgeKind::Implements,
             source: EdgeSource::Lsp,
+            from_line: None,
         }])
         .await
         .unwrap();
