@@ -35,9 +35,11 @@ fn rust_call_edge_carries_from_line() {
         .filter(|e| matches!(e.kind, mycel_core::EdgeKind::Calls))
         .collect();
     assert!(!call_edges.is_empty(), "fixture should produce >=1 CALL edge");
+    // Pinning the exact line locks the `start_position().row + 1` conversion.
+    // A `+ 0` regression would be caught here, where `> 0` alone would not.
+    // The only call site in the fixture is `add(x, x)` inside `double` on line 6.
     for e in &call_edges {
-        assert!(e.from_line.is_some(), "CALL edge {e:?} missing from_line");
-        assert!(e.from_line.unwrap() > 0, "from_line should be 1-indexed");
+        assert_eq!(e.from_line, Some(6), "edge {e:?}");
     }
 }
 
@@ -53,11 +55,10 @@ fn rust_implements_edge_carries_from_line() {
         !impl_edges.is_empty(),
         "fixture should produce >=1 IMPLEMENTS edge"
     );
+    // Pinning the exact line locks the `start_position().row + 1` conversion.
+    // A `+ 0` regression would be caught here, where `> 0` alone would not.
+    // The only impl in the fixture is `impl Greeter for FormalGreeter` on line 9.
     for e in &impl_edges {
-        assert!(
-            e.from_line.is_some(),
-            "IMPLEMENTS edge {e:?} missing from_line"
-        );
-        assert!(e.from_line.unwrap() > 0, "from_line should be 1-indexed");
+        assert_eq!(e.from_line, Some(9), "edge {e:?}");
     }
 }
