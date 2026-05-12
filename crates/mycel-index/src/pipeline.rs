@@ -50,16 +50,102 @@ impl Indexer {
             "extracted"
         );
 
-        // 3. LSP refinement (if configured)
+        // 3. Cross-file resolution via LSP (if configured).
+        //
+        //    Tree-sitter emits Calls / UsesType / Implements edges with bare
+        //    callee names and a `from_line` coord. `resolve_same_file_edges`
+        //    above handles the same-file case; what remains is cross-file —
+        //    LSP territory. We:
+        //      a) Collect a RefSite per qualifying tree-sitter edge.
+        //      b) Build a `from_line -> from_qname` map (the LSP response
+        //         carries only file/line coords, not qnames).
+        //      c) Call `resolve_refs`. On error, log WARN and continue with
+        //         tree-sitter edges only.
+        //      d) For each resolved ref, look up the to-side qname via the
+        //         graph (`symbol_containing`). If the definition is outside
+        //         the indexed surface, drop the edge.
         let mut all_edges = extraction.edges.clone();
         if let Some(lsp) = &self.lsp {
-            match lsp.refine(path, extractor.language_name(), &extraction).await {
-                Ok(mut lsp_edges) => {
-                    mycel_extract::resolve_same_file_edges(path, &mut lsp_edges, &extraction.symbols);
-                    debug!(file=%path, n_lsp_edges = lsp_edges.len(), "lsp refined");
-                    all_edges.extend(lsp_edges);
+            use mycel_lsp::protocol::RefSite;
+            use std::collections::HashMap;
+
+            let mut from_line_to_qname: HashMap<u32, String> = HashMap::new();
+            let mut sites: Vec<RefSite> = Vec::new();
+            for e in &all_edges {
+                let kind_str = match e.kind {
+                    EdgeKind::Calls => "calls",
+                    EdgeKind::UsesType => "uses_type",
+                    EdgeKind::Implements => "implements",
+                    _ => continue,
+                };
+                let Some(line) = e.from_line else { continue };
+                from_line_to_qname
+                    .entry(line)
+                    .or_insert_with(|| e.from.clone());
+                sites.push(RefSite {
+                    line,
+                    // Line-hover suffices for v1; column accuracy is a follow-up
+                    // refinement once the bridge supports per-site columns from
+                    // the tree-sitter capture.
+                    col: 0,
+                    kind: kind_str.into(),
+                });
+            }
+
+            if !sites.is_empty() {
+                match lsp
+                    .resolve_refs(path, extractor.language_name(), sites)
+                    .await
+                {
+                    Ok(refs) => {
+                        let mut resolved = 0usize;
+                        for r in refs {
+                            let Some(from_qname) = from_line_to_qname.get(&r.from_line) else {
+                                // LSP returned a site we didn't seed — shouldn't
+                                // happen, but skip rather than fabricate a from.
+                                continue;
+                            };
+                            let to_qname = match self
+                                .graph
+                                .symbol_containing(&r.to_path, r.to_line)
+                                .await
+                            {
+                                Ok(Some(q)) => q,
+                                Ok(None) => continue, // definition outside indexed surface
+                                Err(e) => {
+                                    warn!(
+                                        file=%path,
+                                        to_path = %r.to_path,
+                                        to_line = r.to_line,
+                                        error=%e,
+                                        "symbol_containing failed; dropping resolved ref",
+                                    );
+                                    continue;
+                                }
+                            };
+                            let kind = match r.kind.as_str() {
+                                "calls" => EdgeKind::Calls,
+                                "uses_type" => EdgeKind::UsesType,
+                                "implements" => EdgeKind::Implements,
+                                _ => continue,
+                            };
+                            all_edges.push(Edge {
+                                from: from_qname.clone(),
+                                to: to_qname,
+                                kind,
+                                source: EdgeSource::Lsp,
+                                from_line: Some(r.from_line),
+                            });
+                            resolved += 1;
+                        }
+                        debug!(file=%path, n_resolved = resolved, "lsp resolve_refs");
+                    }
+                    Err(e) => warn!(
+                        file=%path,
+                        error=%e,
+                        "lsp resolve_refs failed; proceeding with tree-sitter edges only",
+                    ),
                 }
-                Err(e) => warn!(file=%path, error=%e, "lsp refine failed; proceeding with tree-sitter only"),
             }
         }
 

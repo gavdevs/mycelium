@@ -166,6 +166,12 @@ async fn wait_loop(
 }
 
 impl MultilspyResolver {
+    #[deprecated(
+        note = "Phase 3 Workstream A: use `resolve_refs` instead. \
+                `refine` emits degenerate REFERENCES edges keyed on file URIs, \
+                which never resolve to Symbol qnames at upsert time and so \
+                never land in the graph."
+    )]
     pub async fn refine(
         &self,
         path: &camino::Utf8Path,

@@ -16,6 +16,10 @@ async fn lsp_smoke_typescript() {
     ).await.expect("spawn multilspy");
     let path: Utf8PathBuf = "tests/fixtures/typescript/imports_and_exports.ts".into();
     let extraction = mycel_extract::ExtractionOutput::default();
+    // `refine` is deprecated in favor of `resolve_refs` (Phase 3 Workstream A)
+    // but this smoke test still exercises it directly to keep coverage on the
+    // legacy bridge op while it remains in the codebase.
+    #[allow(deprecated)]
     let edges = resolver.refine(&path, "typescript", &extraction).await
         .expect("refine returns Ok even when partial");
     eprintln!("got {} edges", edges.len());
