@@ -79,6 +79,12 @@ impl Indexer {
                     _ => continue,
                 };
                 let Some(line) = e.from_line else { continue };
+                // Assumes one enclosing-symbol per from_line: a single source line in a single
+                // file is owned by one tree-sitter parent (e.g., `foo().bar().baz()` on one
+                // line all share an enclosing fn). If a future extractor emits multiple
+                // distinct `from` qnames for the same line — possible with closures or
+                // inline lambdas — promote this to HashMap<u32, Vec<String>> and disambiguate
+                // at apply time. For today's TS+Rust extractors this is safe.
                 from_line_to_qname
                     .entry(line)
                     .or_insert_with(|| e.from.clone());
@@ -100,6 +106,14 @@ impl Indexer {
                     Ok(refs) => {
                         let mut resolved = 0usize;
                         for r in refs {
+                            if r.from_path != path.as_str() {
+                                tracing::warn!(
+                                    file = %path,
+                                    bridge_from_path = %r.from_path,
+                                    "resolve_refs response carries a from_path that doesn't match the request; skipping",
+                                );
+                                continue;
+                            }
                             let Some(from_qname) = from_line_to_qname.get(&r.from_line) else {
                                 // LSP returned a site we didn't seed — shouldn't
                                 // happen, but skip rather than fabricate a from.
