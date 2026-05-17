@@ -7,3 +7,4 @@
 *.log
 .worktrees/
 .claude/
+__pycache__/

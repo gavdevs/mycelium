@@ -3,15 +3,28 @@
 use camino::Utf8PathBuf;
 use mycel_lsp::*;
 
+/// Workspace root resolved from `CARGO_MANIFEST_DIR`. `cargo test` sets the
+/// test binary's CWD to the package manifest directory, but the bridge script
+/// and TS fixtures live at the workspace root — so we anchor on the manifest
+/// dir and walk up two levels (`crates/mycel-lsp` → workspace root).
+fn workspace_root() -> Utf8PathBuf {
+    Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .expect("workspace root resolvable from CARGO_MANIFEST_DIR")
+}
+
 #[tokio::test]
 async fn lsp_smoke_typescript() {
     if std::env::var("MYCEL_TEST_LSP").ok().as_deref() != Some("1") {
         eprintln!("skipping (set MYCEL_TEST_LSP=1 to run)");
         return;
     }
-    let repo: Utf8PathBuf = std::env::current_dir().unwrap().try_into().unwrap();
+    let repo = workspace_root();
+    let bridge = repo.join("scripts/multilspy_bridge.py");
     let resolver = MultilspyResolver::spawn(
-        "python3 scripts/multilspy_bridge.py",
+        &format!("python3 {bridge}"),
         repo.clone(),
     ).await.expect("spawn multilspy");
     let path: Utf8PathBuf = "tests/fixtures/typescript/imports_and_exports.ts".into();
@@ -44,9 +57,10 @@ async fn lsp_resolve_refs_typescript() {
     //   `    return \`Hi ${name}, sum is ${add(1, 2)}\`;`
     //                                       ^ col 33
     // It resolves to `tests/fixtures/typescript/simple_function.ts` line 1.
-    let repo: Utf8PathBuf = std::env::current_dir().unwrap().try_into().unwrap();
+    let repo = workspace_root();
+    let bridge = repo.join("scripts/multilspy_bridge.py");
     let resolver = MultilspyResolver::spawn(
-        "python3 scripts/multilspy_bridge.py",
+        &format!("python3 {bridge}"),
         repo.clone(),
     )
     .await

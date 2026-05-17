@@ -25,3 +25,4 @@ futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 async-trait = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }

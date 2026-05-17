@@ -79,6 +79,13 @@ impl Indexer {
                     _ => continue,
                 };
                 let Some(line) = e.from_line else { continue };
+                // Skip edges whose target already resolved to a qname
+                // (`<file>::<symbol>`) — these are same-file resolutions
+                // produced by `resolve_same_file_edges`. Sending them to LSP
+                // wastes a round-trip and column 0 returns nothing anyway.
+                if e.to.contains("::") {
+                    continue;
+                }
                 // Assumes one enclosing-symbol per from_line: a single source line in a single
                 // file is owned by one tree-sitter parent (e.g., `foo().bar().baz()` on one
                 // line all share an enclosing fn). If a future extractor emits multiple
@@ -88,12 +95,15 @@ impl Indexer {
                 from_line_to_qname
                     .entry(line)
                     .or_insert_with(|| e.from.clone());
+                // Column accuracy matters: tsserver's request_definition returns
+                // empty when the cursor lands on whitespace. We locate the bare
+                // callee name in the source line to seed an identifier-bearing
+                // column. Falls back to 0 if not found (same as the no-column
+                // baseline; the LSP call will likely return empty).
+                let col = locate_token_col(content, line, &e.to);
                 sites.push(RefSite {
                     line,
-                    // Line-hover suffices for v1; column accuracy is a follow-up
-                    // refinement once the bridge supports per-site columns from
-                    // the tree-sitter capture.
-                    col: 0,
+                    col,
                     kind: kind_str.into(),
                 });
             }
@@ -363,5 +373,67 @@ impl Indexer {
         self.graph.write_manifest(&manifest).await?;
 
         Ok(count)
+    }
+}
+
+/// Return the 0-indexed column of the first word-boundary occurrence of
+/// `token` on `line` (1-indexed) in `content`. Returns 0 if not found —
+/// caller-side LSP will return empty for that site, which is the same
+/// behavior as the previous "always col 0" baseline.
+///
+/// Word-boundary: the char before must not be alphanumeric/underscore and
+/// the char after must not be alphanumeric/underscore. This avoids matching
+/// `add` inside `padded`.
+fn locate_token_col(content: &str, line: u32, token: &str) -> u32 {
+    if token.is_empty() {
+        return 0;
+    }
+    let line_idx = line.saturating_sub(1) as usize;
+    let Some(line_str) = content.lines().nth(line_idx) else {
+        return 0;
+    };
+    let bytes = line_str.as_bytes();
+    let tok = token.as_bytes();
+    let mut i = 0usize;
+    while i + tok.len() <= bytes.len() {
+        if bytes[i..i + tok.len()] == *tok {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_ok = i + tok.len() == bytes.len() || !is_ident_byte(bytes[i + tok.len()]);
+            if before_ok && after_ok {
+                return i as u32;
+            }
+        }
+        i += 1;
+    }
+    0
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locate_token_col_finds_word_boundary() {
+        let content = "    return `Hi ${name}, sum is ${add(1, 2)}`;\n";
+        let col = locate_token_col(content, 1, "add");
+        assert_eq!(col, 33, "expected col 33 for `add` in template literal");
+    }
+
+    #[test]
+    fn locate_token_col_skips_substring_match() {
+        // `add` inside `padded` must not match.
+        let content = "let padded = 1;\n";
+        let col = locate_token_col(content, 1, "add");
+        assert_eq!(col, 0, "should not match `add` inside `padded`");
+    }
+
+    #[test]
+    fn locate_token_col_returns_zero_when_line_missing() {
+        let content = "only one line\n";
+        assert_eq!(locate_token_col(content, 99, "missing"), 0);
     }
 }

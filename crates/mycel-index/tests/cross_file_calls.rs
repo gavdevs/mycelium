@@ -54,6 +54,7 @@ async fn cross_file_calls_land_in_graph() {
         );
         return;
     }
+    let _ = tracing_subscriber::fmt::try_init();
 
     // Source fixtures live at <workspace_root>/tests/fixtures/typescript/.
     // CARGO_MANIFEST_DIR is crates/mycel-index; ../.. lands at the workspace root.
