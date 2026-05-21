@@ -50,16 +50,126 @@ impl Indexer {
             "extracted"
         );
 
-        // 3. LSP refinement (if configured)
+        // 3. Cross-file resolution via LSP (if configured).
+        //
+        //    Tree-sitter emits Calls / UsesType / Implements edges with bare
+        //    callee names and a `from_line` coord. `resolve_same_file_edges`
+        //    above handles the same-file case; what remains is cross-file —
+        //    LSP territory. We:
+        //      a) Collect a RefSite per qualifying tree-sitter edge.
+        //      b) Build a `from_line -> from_qname` map (the LSP response
+        //         carries only file/line coords, not qnames).
+        //      c) Call `resolve_refs`. On error, log WARN and continue with
+        //         tree-sitter edges only.
+        //      d) For each resolved ref, look up the to-side qname via the
+        //         graph (`symbol_containing`). If the definition is outside
+        //         the indexed surface, drop the edge.
         let mut all_edges = extraction.edges.clone();
         if let Some(lsp) = &self.lsp {
-            match lsp.refine(path, extractor.language_name(), &extraction).await {
-                Ok(mut lsp_edges) => {
-                    mycel_extract::resolve_same_file_edges(path, &mut lsp_edges, &extraction.symbols);
-                    debug!(file=%path, n_lsp_edges = lsp_edges.len(), "lsp refined");
-                    all_edges.extend(lsp_edges);
+            use mycel_lsp::protocol::RefSite;
+            use std::collections::HashMap;
+
+            let mut from_line_to_qname: HashMap<u32, String> = HashMap::new();
+            let mut sites: Vec<RefSite> = Vec::new();
+            for e in &all_edges {
+                let kind_str = match e.kind {
+                    EdgeKind::Calls => "calls",
+                    EdgeKind::UsesType => "uses_type",
+                    EdgeKind::Implements => "implements",
+                    _ => continue,
+                };
+                let Some(line) = e.from_line else { continue };
+                // Skip edges whose target already resolved to a qname
+                // (`<file>::<symbol>`) — these are same-file resolutions
+                // produced by `resolve_same_file_edges`. Sending them to LSP
+                // wastes a round-trip and column 0 returns nothing anyway.
+                if e.to.contains("::") {
+                    continue;
                 }
-                Err(e) => warn!(file=%path, error=%e, "lsp refine failed; proceeding with tree-sitter only"),
+                // Assumes one enclosing-symbol per from_line: a single source line in a single
+                // file is owned by one tree-sitter parent (e.g., `foo().bar().baz()` on one
+                // line all share an enclosing fn). If a future extractor emits multiple
+                // distinct `from` qnames for the same line — possible with closures or
+                // inline lambdas — promote this to HashMap<u32, Vec<String>> and disambiguate
+                // at apply time. For today's TS+Rust extractors this is safe.
+                from_line_to_qname
+                    .entry(line)
+                    .or_insert_with(|| e.from.clone());
+                // Column accuracy matters: tsserver's request_definition returns
+                // empty when the cursor lands on whitespace. We locate the bare
+                // callee name in the source line to seed an identifier-bearing
+                // column. Falls back to 0 if not found (same as the no-column
+                // baseline; the LSP call will likely return empty).
+                let col = locate_token_col(content, line, &e.to);
+                sites.push(RefSite {
+                    line,
+                    col,
+                    kind: kind_str.into(),
+                });
+            }
+
+            if !sites.is_empty() {
+                match lsp
+                    .resolve_refs(path, extractor.language_name(), sites)
+                    .await
+                {
+                    Ok(refs) => {
+                        let mut resolved = 0usize;
+                        for r in refs {
+                            if r.from_path != path.as_str() {
+                                tracing::warn!(
+                                    file = %path,
+                                    bridge_from_path = %r.from_path,
+                                    "resolve_refs response carries a from_path that doesn't match the request; skipping",
+                                );
+                                continue;
+                            }
+                            let Some(from_qname) = from_line_to_qname.get(&r.from_line) else {
+                                // LSP returned a site we didn't seed — shouldn't
+                                // happen, but skip rather than fabricate a from.
+                                continue;
+                            };
+                            let to_qname = match self
+                                .graph
+                                .symbol_containing(&r.to_path, r.to_line)
+                                .await
+                            {
+                                Ok(Some(q)) => q,
+                                Ok(None) => continue, // definition outside indexed surface
+                                Err(e) => {
+                                    warn!(
+                                        file=%path,
+                                        to_path = %r.to_path,
+                                        to_line = r.to_line,
+                                        error=%e,
+                                        "symbol_containing failed; dropping resolved ref",
+                                    );
+                                    continue;
+                                }
+                            };
+                            let kind = match r.kind.as_str() {
+                                "calls" => EdgeKind::Calls,
+                                "uses_type" => EdgeKind::UsesType,
+                                "implements" => EdgeKind::Implements,
+                                _ => continue,
+                            };
+                            all_edges.push(Edge {
+                                from: from_qname.clone(),
+                                to: to_qname,
+                                kind,
+                                source: EdgeSource::Lsp,
+                                from_line: Some(r.from_line),
+                            });
+                            resolved += 1;
+                        }
+                        debug!(file=%path, n_resolved = resolved, "lsp resolve_refs");
+                    }
+                    Err(e) => warn!(
+                        file=%path,
+                        error=%e,
+                        "lsp resolve_refs failed; proceeding with tree-sitter edges only",
+                    ),
+                }
             }
         }
 
@@ -263,5 +373,67 @@ impl Indexer {
         self.graph.write_manifest(&manifest).await?;
 
         Ok(count)
+    }
+}
+
+/// Return the 0-indexed column of the first word-boundary occurrence of
+/// `token` on `line` (1-indexed) in `content`. Returns 0 if not found —
+/// caller-side LSP will return empty for that site, which is the same
+/// behavior as the previous "always col 0" baseline.
+///
+/// Word-boundary: the char before must not be alphanumeric/underscore and
+/// the char after must not be alphanumeric/underscore. This avoids matching
+/// `add` inside `padded`.
+fn locate_token_col(content: &str, line: u32, token: &str) -> u32 {
+    if token.is_empty() {
+        return 0;
+    }
+    let line_idx = line.saturating_sub(1) as usize;
+    let Some(line_str) = content.lines().nth(line_idx) else {
+        return 0;
+    };
+    let bytes = line_str.as_bytes();
+    let tok = token.as_bytes();
+    let mut i = 0usize;
+    while i + tok.len() <= bytes.len() {
+        if bytes[i..i + tok.len()] == *tok {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_ok = i + tok.len() == bytes.len() || !is_ident_byte(bytes[i + tok.len()]);
+            if before_ok && after_ok {
+                return i as u32;
+            }
+        }
+        i += 1;
+    }
+    0
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn locate_token_col_finds_word_boundary() {
+        let content = "    return `Hi ${name}, sum is ${add(1, 2)}`;\n";
+        let col = locate_token_col(content, 1, "add");
+        assert_eq!(col, 33, "expected col 33 for `add` in template literal");
+    }
+
+    #[test]
+    fn locate_token_col_skips_substring_match() {
+        // `add` inside `padded` must not match.
+        let content = "let padded = 1;\n";
+        let col = locate_token_col(content, 1, "add");
+        assert_eq!(col, 0, "should not match `add` inside `padded`");
+    }
+
+    #[test]
+    fn locate_token_col_returns_zero_when_line_missing() {
+        let content = "only one line\n";
+        assert_eq!(locate_token_col(content, 99, "missing"), 0);
     }
 }

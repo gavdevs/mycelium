@@ -6,7 +6,7 @@ Mycelium is a local-first, graph-aware code intelligence layer for AI agents. We
 
 The daemon is registered as a systemd-user service (`mycel.service`) and watches this tree with a 2s debounce. Edits you make are reflected in the graph within seconds.
 
-**As of 2026-05-04 benchmarking: only `definers` is reliable.** Use it for "where is X defined" — it returns a line range and signature in one shot, saving the subsequent `Read`. Fall back to grep for everything else.
+**As of 2026-05-17 (Phase 3 Workstream A):** `definers`, `callers`, `uses`, and `implements` are all reliable for TypeScript and Rust within the indexed surface. `find` is reliable with description coverage. `IMPORTS` queries still need `grep` (file→file edge granularity).
 
 Run from the repo root (`target/release/mycel`; not on PATH):
 
@@ -20,9 +20,9 @@ Run from the repo root (`target/release/mycel`; not on PATH):
 | Install the graph-care skill into Claude Code | `target/release/mycel --repo . skill install` | **Works** |
 | Backfill legacy description hashes | `target/release/mycel --repo . synthesize --refresh-hashes-only` | **Works** — one-shot for graphs predating 2026-05-05 |
 | Re-index from scratch (drop legacy descriptions) | `target/release/mycel --repo . index . --force-cold-rebuild` | **Works** |
-| Callers/callees | `target/release/mycel --repo . callers <name>` | **Broken** — returns empty; use grep |
-| Type usage | `target/release/mycel --repo . uses <type>` | **Broken** — returns empty; use grep |
-| Interface implementations | `target/release/mycel --repo . implements <iface>` | **Broken** — IMPLEMENTS edges not landing; use grep |
+| Callers/callees | `target/release/mycel --repo . callers <name>` | **Works** — cross-file CALLS via LSP definition resolution (Phase 3 Workstream A) |
+| Type usage | `target/release/mycel --repo . uses <type>` | **Works** — cross-file USES_TYPE via LSP definition resolution (Phase 3 Workstream A) |
+| Interface implementations | `target/release/mycel --repo . implements <iface>` | **Works** — cross-file IMPLEMENTS via LSP definition resolution (Phase 3 Workstream A) |
 
 Add `--json` for structured output. If you've rebuilt the daemon: `target/release/mycel daemon stop && target/release/mycel daemon start`.
 
@@ -35,9 +35,8 @@ These are tracked and being worked on; flag them when they bite, don't try to fi
 - **`find` quality depends on description coverage.** Phase 2 ships description synthesis — a freshly indexed graph has signature+body-slice-embedded symbols until Claude (via the `mycel-graph-care` skill) writes behavioral descriptions for the symbols you actually work with — coverage grows with use, not with a one-shot bulk command. Symbols with descriptions cluster by behavior; signature-embedded symbols cluster by name shape. Mixed states (partial coverage) give mixed results.
 - **Module-declaration hallucinations.** (Applies to the bulk `mycel synthesize` path; the workload-driven skill instructs Claude to skip module decls.) Single-line `mod foo;` symbols get rich behavioral descriptions hallucinated from the module's name only (e.g., `mod launchd;` → "core logic for managing background services… launching system daemons"), which cluster against unrelated queries. Known follow-up: skip `SymbolKind::Module` in `list_symbols_for_synthesis`. Until then, filter top results by `kind` if a module decl is dragging your search off course.
 - **HNSW low-k flakiness.** FalkorDB's HNSW vector index walks adaptively; at `--limit < 10` it sometimes returns zero rows on valid queries that have answers at `--limit 20`. Default is `20` post-Phase 2; raise it further if you suspect a result is being clipped.
-- **`callers`, `uses`, `implements` all return empty.** Benchmarked: `callers content_hash` → empty (grep found 3 callers). `uses Symbol` → empty (grep found 67). `implements Embedder` → empty (OllamaEmbedder clearly implements it). CALLS, TYPED_BY, and IMPLEMENTS edges are not landing. Phase 2/3 work.
-- **Cross-file CALLS edges drop silently.** Tree-sitter only resolves same-file callees; the multilspy bridge currently emits degenerate `REFERENCES` so cross-file CALLS don't land. Phase 2/3 territory.
 - **`IMPORTS` queries return empty** — tree-sitter emits import edges as file→file, not Symbol→Symbol. Use `grep -rn 'use <crate>'` directly.
+- **LSP-resolved edges only land within the indexed surface.** Cross-file CALLS / USES_TYPE / IMPLEMENTS that resolve into stdlib, node_modules, or any path outside the repo are dropped (the bridge returns the file URI, `symbol_containing` returns None, the edge is skipped). Same-language source files inside the repo work. Phase 3 Workstream A.
 
 If a `mycel` command returns empty when you expect results, **first verify the daemon is healthy** before assuming the query is wrong:
 

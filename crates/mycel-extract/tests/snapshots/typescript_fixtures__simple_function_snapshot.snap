@@ -1,6 +1,5 @@
 ---
 source: crates/mycel-extract/tests/typescript_fixtures.rs
-assertion_line: 21
 expression: "extract_fixture(\"simple_function.ts\")"
 ---
 symbols:
@@ -23,4 +22,5 @@ edges:
     to: add
     kind: calls
     source: tree_sitter
+    from_line: 6
 language: typescript

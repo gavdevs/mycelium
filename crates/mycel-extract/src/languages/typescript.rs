@@ -205,6 +205,9 @@ fn extract_symbols_and_edges(
             to: callee_name.into(),
             kind: EdgeKind::Calls,
             source: EdgeSource::TreeSitter,
+            // 1-indexed call-site row so LSP refinement can hover the line
+            // to resolve `callee_name` across files.
+            from_line: Some(site.start_position().row as u32 + 1),
         });
     }
 
@@ -229,6 +232,7 @@ fn extract_symbols_and_edges(
                     to: src_text.into(),
                     kind: EdgeKind::Imports,
                     source: EdgeSource::TreeSitter,
+                    from_line: None,
                 });
             }
         }

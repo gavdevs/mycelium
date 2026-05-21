@@ -103,6 +103,7 @@ async fn edge_upsert_callers_query() {
             to: "crate::bar".into(),
             kind: EdgeKind::Calls,
             source: EdgeSource::Lsp,
+            from_line: None,
         }])
         .await
         .unwrap();
@@ -154,6 +155,7 @@ async fn imports_uses_implements_queries() {
             to: "ts::IFoo".into(),
             kind: EdgeKind::Implements,
             source: EdgeSource::Lsp,
+            from_line: None,
         }])
         .await
         .unwrap();
@@ -785,6 +787,45 @@ async fn set_description_round_trips_newlines_and_quotes() {
         .unwrap()
         .unwrap();
     assert_eq!(info.description.as_deref(), Some(payload));
+}
+
+#[tokio::test]
+async fn symbol_containing_finds_enclosing_symbol() {
+    let client = fresh_client("mycel:test:symbol_containing").await;
+    // Upsert a Symbol that spans lines 10..=20.
+    let sym = Symbol {
+        qualified_name: QualifiedName::new("src/foo.rs::bar"),
+        kind: SymbolKind::Function,
+        file_path: "src/foo.rs".into(),
+        start_line: 10,
+        end_line: 20,
+        signature: Signature::new("fn bar()"),
+        jsdoc: None,
+        synthesized_description: None,
+        exported: true,
+        embedding: None,
+        body_hash: None,
+        description_source_hash: None,
+    };
+    client.upsert_symbol(&sym).await.unwrap();
+
+    // A line inside the span -> Some(qname)
+    let hit = client.symbol_containing("src/foo.rs", 15).await.unwrap();
+    assert_eq!(hit.as_deref(), Some("src/foo.rs::bar"));
+
+    // Boundary lines (inclusive both ends)
+    let lo = client.symbol_containing("src/foo.rs", 10).await.unwrap();
+    let hi = client.symbol_containing("src/foo.rs", 20).await.unwrap();
+    assert_eq!(lo.as_deref(), Some("src/foo.rs::bar"));
+    assert_eq!(hi.as_deref(), Some("src/foo.rs::bar"));
+
+    // A line outside the span -> None
+    let miss = client.symbol_containing("src/foo.rs", 5).await.unwrap();
+    assert!(miss.is_none(), "line 5 is outside 10..=20");
+
+    // A line in a different file -> None
+    let other = client.symbol_containing("src/other.rs", 15).await.unwrap();
+    assert!(other.is_none());
 }
 
 #[tokio::test]

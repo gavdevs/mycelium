@@ -1,6 +1,7 @@
 use crate::GraphClient;
 use crate::cypher::escape;
 use crate::symbol::parse_symbol_row;
+use falkordb::FalkorValue;
 use mycel_core::*;
 
 impl GraphClient {
@@ -55,5 +56,38 @@ impl GraphClient {
             .into_iter()
             .filter_map(parse_symbol_row)
             .collect())
+    }
+
+    /// Returns the qname of the Symbol whose `start_line..=end_line` range
+    /// contains `line` in `file_path`. Used by Workstream A's pipeline to map
+    /// LSP-returned definition locations back to Symbol qnames.
+    ///
+    /// Returns `Ok(None)` when no Symbol spans that location — common case
+    /// for definitions outside the indexed surface (stdlib, node_modules) or
+    /// for references into module-decl symbols whose range we don't model.
+    /// For nested symbols (e.g., a method inside a class — both could match
+    /// line N), `LIMIT 1` arbitrarily picks one; a future iteration may
+    /// prefer the smallest enclosing range.
+    pub async fn symbol_containing(
+        &self,
+        file_path: &str,
+        line: u32,
+    ) -> Result<Option<String>> {
+        let cypher = format!(
+            "MATCH (s:Symbol) WHERE s.file_path = '{p}' \
+               AND s.start_line <= {l} AND s.end_line >= {l} \
+             RETURN s.qualified_name LIMIT 1",
+            p = escape(file_path),
+            l = line,
+        );
+        let rows = self.query(&cypher).await?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .and_then(|v| match v {
+                FalkorValue::String(s) => Some(s),
+                _ => None,
+            }))
     }
 }

@@ -41,6 +41,7 @@ fn edge_kind_serializes_lowercase() {
         to: "b".into(),
         kind: EdgeKind::Calls,
         source: EdgeSource::Lsp,
+        from_line: None,
     };
     let json = serde_json::to_string(&e).unwrap();
     assert!(json.contains("\"calls\""));

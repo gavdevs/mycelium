@@ -1088,6 +1088,7 @@ dependencies = [
 name = "mycel-index"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "blake3",
  "camino",
  "futures",
@@ -1096,9 +1097,11 @@ dependencies = [
  "mycel-graph",
  "mycel-lsp",
  "mycel-models",
+ "tempfile",
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "walkdir",
 ]
 

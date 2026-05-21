@@ -30,3 +30,20 @@ fn class_with_methods_snapshot() {
 fn imports_and_exports_snapshot() {
     insta::assert_yaml_snapshot!(extract_fixture("imports_and_exports.ts"));
 }
+
+#[test]
+fn typescript_call_edge_carries_from_line() {
+    let out = extract_fixture("imports_and_exports.ts");
+    let call_edges: Vec<_> = out
+        .edges
+        .iter()
+        .filter(|e| matches!(e.kind, mycel_core::EdgeKind::Calls))
+        .collect();
+    assert!(!call_edges.is_empty(), "fixture should produce >=1 CALL edge");
+    // Pinning the exact line locks the `start_position().row + 1` conversion.
+    // A `+ 0` regression would be caught here, where `> 0` alone would not.
+    // The only call site in the fixture is `add(1, 2)` on line 6.
+    for e in &call_edges {
+        assert_eq!(e.from_line, Some(6), "edge {e:?}");
+    }
+}

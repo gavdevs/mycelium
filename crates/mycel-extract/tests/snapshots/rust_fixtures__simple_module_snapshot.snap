@@ -1,6 +1,5 @@
 ---
 source: crates/mycel-extract/tests/rust_fixtures.rs
-assertion_line: 21
 expression: "extract_fixture(\"simple_module.rs\")"
 ---
 symbols:
@@ -30,4 +29,5 @@ edges:
     to: add
     kind: calls
     source: tree_sitter
+    from_line: 6
 language: rust
